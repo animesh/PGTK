@@ -21,6 +21,15 @@ The RNA-seq transcriptome data for the seven Myeloma cell lines is publicly avai
 - **NCBI BioProject ID:** [PRJNA1176350](https://www.ncbi.nlm.nih.gov/bioproject/1176350)
 - **Access:** [https://www.ncbi.nlm.nih.gov/bioproject/1176350](https://www.ncbi.nlm.nih.gov/bioproject/1176350)
 
+#### trancriptome https://www.ncbi.nlm.nih.gov/bioproject/1176350 download using https://github.com/ncbi/sra-tools/wiki/01.-Downloading-SRA-Toolkit 
+
+```
+wget https://ftp-trace.ncbi.nlm.nih.gov/sra/sdk/3.2.1/sratoolkit.3.2.1-ubuntu64.tar.gz
+tar xvzf sratoolkit.3.2.1-ubuntu64.tar.gz
+SRATOOL_DIR="$PWD$/sratoolkit.3.2.1-ubuntu64"; mkdir -p ./fasterq_tmp; curl -s "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=sra&term=PRJNA1176350&usehistory=y" | grep -oP '(?<=<QueryKey>)\d+|(?<=<WebEnv>)[^<]+' | { read qk; read we; curl -s "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=sra&query_key=$qk&WebEnv=$we&rettype=runinfo&retmode=text"; } | tail -n +2 | cut -d',' -f1 | xargs -P4 -I{} "$SRATOOL_DIR/bin/fasterq-dump" {} --split-files -e 4 -p -O . --temp ./fasterq_tmp
+```
+
+
 ### Proteomics Data
 
 The mass spectrometry proteomics data is available through the PRIDE Archive:
@@ -30,6 +39,14 @@ The mass spectrometry proteomics data is available through the PRIDE Archive:
 
 - **PRIDE Project 2:** [PXD033510](https://www.ebi.ac.uk/pride/archive/projects/PXD033510/)
   - Access: [https://www.ebi.ac.uk/pride/archive/projects/PXD033510/](https://www.ebi.ac.uk/pride/archive/projects/PXD033510/)
+
+  #### proteome https://www.ebi.ac.uk/pride/archive/projects/PXD033531 and https://www.ebi.ac.uk/pride/archive/projects/PXD033510/ dowload recursively from the ftp
+
+```
+wget -r "ftp://ftp.pride.ebi.ac.uk/pride/data/archive/2024/11/PXD033531/"
+wget -r "ftp://ftp.pride.ebi.ac.uk/pride/data/archive/2024/11/PXD033510/"
+```
+
 
 ## Project Description
 
@@ -55,4 +72,4 @@ See [LICENSE](LICENSE) file for details.
 
 ## Contact
 
-For questions or collaboration inquiries, please refer to the corresponding author information in the published article.
+me 🤓
