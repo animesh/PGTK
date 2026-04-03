@@ -1,0 +1,18 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<ExtractSummaries>
+    <ExtractSummary>
+        <file>Z:\Download\TK\TK10\TK1049.markdup.sorted.bam</file>
+        <acceptedReads>0</acceptedReads>
+        <allReads>0</allReads>
+    </ExtractSummary>
+    <ExtractSummary>
+        <file>Z:\Download\TK\TK10\TK1050.markdup.sorted.bam</file>
+        <acceptedReads>0</acceptedReads>
+        <allReads>0</allReads>
+    </ExtractSummary>
+    <ExtractSummary>
+        <file>Z:\Download\TK\TK10\TK1051.markdup.sorted.bam</file>
+        <acceptedReads>0</acceptedReads>
+        <allReads>0</allReads>
+    </ExtractSummary>
+</ExtractSummaries>

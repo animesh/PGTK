@@ -1,0 +1,8 @@
+sample,fastq_1,fastq_2,strandedness,TK,Group
+SRR31089070,/mnt/z/Download/TK/fastq/SRR31089070_1.fastq.gz,/mnt/z/Download/TK/fastq/SRR31089070_2.fastq.gz,unknown,18,resistant
+SRR31089071,/mnt/z/Download/TK/fastq/SRR31089071_1.fastq.gz,/mnt/z/Download/TK/fastq/SRR31089071_2.fastq.gz,unknown,16,sensitive
+SRR31089072,/mnt/z/Download/TK/fastq/SRR31089072_1.fastq.gz,/mnt/z/Download/TK/fastq/SRR31089072_2.fastq.gz,unknown,14,sensitive
+SRR31089073,/mnt/z/Download/TK/fastq/SRR31089073_1.fastq.gz,/mnt/z/Download/TK/fastq/SRR31089073_2.fastq.gz,unknown,13,sensitive
+SRR31089074,/mnt/z/Download/TK/fastq/SRR31089074_1.fastq.gz,/mnt/z/Download/TK/fastq/SRR31089074_2.fastq.gz,unknown,12,resistant
+SRR31089075,/mnt/z/Download/TK/fastq/SRR31089075_1.fastq.gz,/mnt/z/Download/TK/fastq/SRR31089075_2.fastq.gz,unknown,10,resistant
+SRR31089076,/mnt/z/Download/TK/fastq/SRR31089076_1.fastq.gz,/mnt/z/Download/TK/fastq/SRR31089076_2.fastq.gz,unknown,9,resistant

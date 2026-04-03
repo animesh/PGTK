@@ -1,0 +1,20 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<CallingParams>
+    <filePaths>
+        <string>Z:\Download\TK\TK10\TK1049.markdup.sorted.bam</string>
+        <string>Z:\Download\TK\TK10\TK1050.markdup.sorted.bam</string>
+        <string>Z:\Download\TK\TK10\TK1051.markdup.sorted.bam</string>
+    </filePaths>
+    <genomeFasta>Z:\Download\TK\genome.fa</genomeFasta>
+    <genomeAnnotation>Z:\Download\TK\Homo_sapiens.GRCh38.110.gtf</genomeAnnotation>
+    <variantsAnnotation />
+    <tmpFolder />
+    <finalFolder>Z:\Download\TK</finalFolder>
+    <numThreads>1</numThreads>
+    <minTotalDepth>10</minTotalDepth>
+    <minAltDepth>5</minAltDepth>
+    <minAltFrequency>0.15</minAltFrequency>
+    <minBaseQuality>7</minBaseQuality>
+    <minAlignmentQuality>10</minAlignmentQuality>
+    <parseAsSingleEndReads>false</parseAsSingleEndReads>
+</CallingParams>

@@ -66,6 +66,88 @@ If you use this data or findings in your research, please cite:
 DOI: Available at https://www.mdpi.com/2072-6694/16/23/3963
 ```
 
+---
+
+## Nextflow Somatic Variant Calling Pipeline (`main.nf`)
+
+### Overview
+
+A DSL2 Nextflow pipeline for somatic variant calling from RNA-seq BAM files across multiple Myeloma cell line replicates. It calls SNVs/Indels with GATK Mutect2 and structural variants with DELLY2, then merges per-replicate calls into per-group VCFs.
+
+### Pipeline steps
+
+| Step | Tool | Notes |
+|------|------|-------|
+| FASTQ trimming | Trim Galore | Paired-end, quality ≥ 20, adapter auto-detection via `--paired` |
+| Genome indexing | STAR 2.7.11b | Generated once, reused across samples |
+| Alignment | STAR 2-pass | RNA-seq, outputs coordinate-sorted BAM |
+| Mark duplicates | SAMtools | Removes PCR/optical duplicates |
+| Reference indexing | SAMtools faidx + GATK CreateSequenceDictionary | One-time, shared across processes |
+| MAPQ remap | SAMtools | STAR sets MAPQ=255 for unique reads; remapped to 60 so GATK doesn't drop them |
+| SNV/Indel calling | GATK Mutect2 | Tumor-only mode; collects F1R2 read orientation counts |
+| Orientation bias | GATK LearnReadOrientationModel | Corrects FFPE/oxidative damage artefacts |
+| Variant filtering | GATK FilterMutectCalls | Applies orientation priors + default Mutect2 filters |
+| Per-group SNV merge | BCFtools concat | Merges per-replicate filtered VCFs into one per group |
+| SV calling | DELLY2 | Tumor-only; calls DEL, DUP, INV, BND |
+| SV genotyping | DELLY2 genotype | Per-sample re-genotyping against merged site list |
+| SV merge | DELLY2 merge + BCFtools | Merges per-replicate SV VCFs per group |
+
+### Containers
+
+All processes use stable `quay.io/biocontainers` images:
+
+| Image | Used by |
+|-------|---------|
+| `quay.io/biocontainers/star:2.7.11b--h43eeafb_1` | STAR_GENOMEGENERATE, STAR_ALIGN |
+| `quay.io/biocontainers/samtools:1.21--h50ea8bc_0` | SAMTOOLS_FAIDX, SAMTOOLS_MARKDUP, REMAP_MAPQ |
+| `quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0` | GATK_DICT, MUTECT2, LEARN_ORIENTATION, FILTER_MUTECT2, MERGE_SNV_GROUP (header fix) |
+| `quay.io/biocontainers/bcftools:1.21--h8b25389_0` | MERGE_SNV_GROUP, MERGE_SV_GROUP |
+| `quay.io/biocontainers/delly:1.2.9--hd63ebec_1` | DELLY_CALL, DELLY_GENOTYPE, DELLY_MERGE |
+| `wave.seqera.io/wt/…/trim-galore` | TRIM_GALORE |
+
+> **Note:** `community.wave.seqera.io` images were replaced with `quay.io/biocontainers` equivalents after manifest resolution failures.
+
+### Usage
+
+```bash
+# First run
+nextflow run main.nf
+
+# Resume after interruption / fix
+nextflow run main.nf -resume
+```
+
+### Key design decisions
+
+- **MAPQ remapping:** STAR uniquely-mapped reads carry MAPQ=255, which GATK treats as "unavailable" and silently drops. A SAMtools/awk one-liner remaps 255→60 before Mutect2 so all uniquely-mapped reads are used.
+- **Tumor-only mode:** No matched normal available; Mutect2 runs in tumor-only mode with orientation bias correction to reduce artefacts.
+- **Per-replicate → per-group:** Each replicate is called independently, then merged with BCFtools (SNVs) or DELLY merge (SVs) per biological group.
+- **`--paired` is sufficient for adapter trimming:** Trim Galore auto-detects adapters when `--paired` is set; the now-removed `--detect_adapter_for_pe` flag was redundant and unsupported in current Trim Galore versions.
+
+### Input samplesheet (`samplesheet.csv`)
+
+```
+sample,group,read1,read2
+SRR31089070,TK12,fastq/SRR31089070_1.fastq.gz,fastq/SRR31089070_2.fastq.gz
+...
+```
+
+### Output structure
+
+```
+results/
+├── mutect2/<group>/          # Per-replicate unfiltered + filtered VCFs
+├── mutect2_merged/           # Per-group merged SNV VCFs
+├── delly/                    # Per-replicate SV calls
+├── delly_final/              # Per-group merged SV VCFs
+├── coverage/                 # Per-sample coverage BED files
+├── vep/                      # VEP-annotated VCFs
+├── analysis/                 # Downstream plots and tables
+└── pipeline_info/            # Nextflow execution report, timeline, trace
+```
+
+---
+
 ## License
 
 See [LICENSE](LICENSE) file for details.
