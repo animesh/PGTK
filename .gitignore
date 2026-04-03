@@ -1,3 +1,27 @@
+# nextflow
+.nextflow.log
+.nextflow*
+./work/
+.nextflow/
+.*
+*.txt
+fast*
+ftp*
+*.log
+*.out
+*.err
+sra*
+TK*
+Homo_sapiens*
+genome*
+archive*
+work
+*.bam
+*.tmp
+tmp.*
+*.temp
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

@@ -146,6 +146,17 @@ results/
 └── pipeline_info/            # Nextflow execution report, timeline, trace
 ```
 
+### Planned: Mutant FASTA generation
+
+After variant calling, we plan to generate sample-specific FASTA files incorporating the expected somatic variants (SNPs and SNVs) identified by the pipeline. This will involve:
+
+- Taking the per-group merged VCFs (SNVs from Mutect2, SVs from DELLY2)
+- Applying high-confidence PASS variants to the reference genome (GRCh38) using a tool such as `bcftools consensus` or GATK `FastaAlternateReferenceMaker`
+- Producing per-sample/per-group mutant reference FASTAs for downstream use in:
+  - Neoantigen prediction (e.g. pVACseq / MHCflurry)
+  - Proteogenomics database construction (custom protein FASTA for MS/MS searches)
+  - Validation of variant-containing peptides against the PGTK proteomics data
+
 ---
 
 ## License
