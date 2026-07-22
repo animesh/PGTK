@@ -68,44 +68,35 @@ DOI: Available at https://www.mdpi.com/2072-6694/16/23/3963
 
 ---
 
-## Nextflow Somatic Variant Calling Pipeline (`main.nf`)
+## Nextflow Somatic Variant Calling Pipeline (`main.nf`) updates
 
-### Overview
+**Processes removed:**
+- `MUTECT2`, `LEARN_ORIENTATION`, `FILTER_MUTECT2` -- replaced by HaplotypeCaller stack
+- `DELLY_CALL`, `MERGE_SV_SITES`, `DELLY_GENOTYPE`, `MERGE_GENO_GROUP` -- replaced by Arriba
 
-A DSL2 Nextflow pipeline for somatic variant calling from RNA-seq BAM files across multiple Myeloma cell line replicates. It calls SNVs/Indels with GATK Mutect2 and structural variants with DELLY2, then merges per-replicate calls into per-group VCFs.
+**Processes added:**
 
-### Pipeline steps
+`SPLIT_N_CIGAR` (step 7) -- the critical missing step. Without it, GATK fires false positives at every splice junction because N-CIGAR operations look like indels. Goes between REMAP_MAPQ and BQSR.
 
-| Step | Tool | Notes |
-|------|------|-------|
-| FASTQ trimming | Trim Galore | Paired-end, quality ≥ 20, adapter auto-detection via `--paired` |
-| Genome indexing | STAR 2.7.11b | Generated once, reused across samples |
-| Alignment | STAR 2-pass | RNA-seq, outputs coordinate-sorted BAM |
-| Mark duplicates | SAMtools | Removes PCR/optical duplicates |
-| Reference indexing | SAMtools faidx + GATK CreateSequenceDictionary | One-time, shared across processes |
-| MAPQ remap | SAMtools | STAR sets MAPQ=255 for unique reads; remapped to 60 so GATK doesn't drop them |
-| SNV/Indel calling | GATK Mutect2 | Tumor-only mode; collects F1R2 read orientation counts |
-| Orientation bias | GATK LearnReadOrientationModel | Corrects FFPE/oxidative damage artefacts |
-| Variant filtering | GATK FilterMutectCalls | Applies orientation priors + default Mutect2 filters |
-| Per-group SNV merge | BCFtools concat | Merges per-replicate filtered VCFs into one per group |
-| SV calling | DELLY2 | Tumor-only; calls DEL, DUP, INV, BND |
-| SV genotyping | DELLY2 genotype | Per-sample re-genotyping against merged site list |
-| SV merge | DELLY2 merge + BCFtools | Merges per-replicate SV VCFs per group |
+`HAPLOTYPE_CALLER` + `GENOTYPE_GVCFS` -- diploid caller in GVCF mode. Gets you germline + somatic in one pass. `--dont-use-soft-clipped-bases` is mandatory for RNA-seq; `-stand-call-conf 20` is relaxed from 30 to compensate for 20M read depth.
 
-### Containers
+`VARIANT_FILTRATION` + `SELECT_PASS` -- GATK RNA-seq hard filters (QD, FS, MQ, ReadPosRankSum thresholds). VQSR doesn't work on RNA-seq because annotation distributions are incompatible with WGS training data.
 
-All processes use stable `quay.io/biocontainers` images:
+`VEP_ANNOTATE` -- produces CSQ field (consequence + HGVS protein notation) that pypgatk reads.
 
-| Image | Used by |
-|-------|---------|
-| `quay.io/biocontainers/star:2.7.11b--h43eeafb_1` | STAR_GENOMEGENERATE, STAR_ALIGN |
-| `quay.io/biocontainers/samtools:1.21--h50ea8bc_0` | SAMTOOLS_FAIDX, SAMTOOLS_MARKDUP, REMAP_MAPQ |
-| `quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0` | GATK_DICT, MUTECT2, LEARN_ORIENTATION, FILTER_MUTECT2, MERGE_SNV_GROUP (header fix) |
-| `quay.io/biocontainers/bcftools:1.21--h8b25389_0` | MERGE_SNV_GROUP, MERGE_SV_GROUP |
-| `quay.io/biocontainers/delly:1.2.9--hd63ebec_1` | DELLY_CALL, DELLY_GENOTYPE, DELLY_MERGE |
-| `wave.seqera.io/wt/…/trim-galore` | TRIM_GALORE |
+`PYPGATK_FASTA` -- VCF to mutant protein FASTA. Headers get a per-sample tag so MaxQuant/MSFragger results are traceable back to which sample contributed the variant.
 
-> **Note:** `community.wave.seqera.io` images were replaced with `quay.io/biocontainers` equivalents after manifest resolution failures.
+`ARRIBA` -- STAR chimeric reads go here. STAR_ALIGN now emits both the main BAM and `Chimeric.out.sam` (via `WithinBAM SeparateSAMold`). The `outFilterMultimapNmax` was raised from 1 to 50 for Arriba; GATK ignores multimappers naturally via MAPQ.
+
+`TK_PROGRESSION_SUB` -- `bcftools isec -C` keeps only variants private to the progression sample, absent from TK12. These are the variants that appeared between TK12 and TK13/TK14.
+
+`PROGRESSION_FASTA` -- separate FASTA for progression-only variants, with `|PROGRESSION|` in the header so you can filter MS results by progression-acquired variants specifically.
+
+**Samplesheet change needed:** add a `baseline` column. TK12 gets `true`, TK13/TK14 get `false`, all others get empty string. The workflow branches on this field.
+
+**New params required:** `params.vep_cache`, `params.vep_assembly`, `params.reference_proteome`, `params.arriba_blacklist`, `params.arriba_known_fusions`, `params.arriba_protein_domains`. Arriba's database files are bundled with its GitHub release.
+
+Caveat: `PROGRESSION_FASTA` currently calls pypgatk directly on the progression VCF without a fresh VEP run, which means it relies on CSQ annotations already present from the VEP step upstream. 
 
 ### Usage
 
