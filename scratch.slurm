@@ -15,49 +15,79 @@ set -euo pipefail
 PROJECT_ID="nn9036k"
 NEXTFLOW="/cluster/home/ash022/scripts/nextflow"
 WORKDIR="${SLURM_SUBMIT_DIR:-$(pwd -P)}"
-RUN_ID="$SLURM_JOB_ID"
-CONTAINER_DIR="$WORKDIR/singularity_cache"
-REFERENCE_DIR="$WORKDIR/reference_downloads"
-SRA_DIR="$WORKDIR/sra_cache"
+RUN_ID="${SLURM_JOB_ID}"
 
-cd "$WORKDIR"
+CONTAINER_DIR="${WORKDIR}/singularity_cache"
+REFERENCE_DIR="${WORKDIR}/reference_downloads"
+SRA_DIR="${WORKDIR}/sra_cache"
+SCRATCH_ROOT="/cluster/work/users/ash022/tmp/pgtk"
+NXF_WORK="${SCRATCH_ROOT}/work"
+NXF_TMP="${SCRATCH_ROOT}/tmp/launcher-${RUN_ID}"
 
-export NXF_HOME="$WORKDIR/.nextflow_home"
-export NXF_SINGULARITY_CACHEDIR="$CONTAINER_DIR"
-export NXF_WORK="$WORKDIR/work"
-export NXF_OPTS="-Xms1g -Xmx6g"
-export SINGULARITY_TMPDIR="$WORKDIR/singularity_tmp"
-export APPTAINER_TMPDIR="$SINGULARITY_TMPDIR"
-export TMPDIR="$WORKDIR/tmp"
-
-mkdir -p "$NXF_HOME" "$NXF_WORK" "$SINGULARITY_TMPDIR" "$TMPDIR" results
+cd "${WORKDIR}"
 
 module purge
 module load Java/21
 
+export NXF_HOME="${WORKDIR}/.nextflow_home"
+export NXF_SINGULARITY_CACHEDIR="${CONTAINER_DIR}"
+export NXF_OPTS="-Xms1g -Xmx6g"
+export TMPDIR="${NXF_TMP}"
+export TMP="${NXF_TMP}"
+export TEMP="${NXF_TMP}"
+export SINGULARITY_TMPDIR="${NXF_TMP}/singularity"
+export APPTAINER_TMPDIR="${NXF_TMP}/apptainer"
+
+mkdir -p \
+    "${NXF_HOME}" \
+    "${NXF_WORK}" \
+    "${TMPDIR}" \
+    "${SINGULARITY_TMPDIR}" \
+    "${APPTAINER_TMPDIR}" \
+    "${WORKDIR}/results"
+
+command -v singularity >/dev/null
+command -v java >/dev/null
+test -x "${NEXTFLOW}"
+test -s "${WORKDIR}/main.nf"
+test -s "${WORKDIR}/samples.csv"
+test -d "${CONTAINER_DIR}"
+test -d "${REFERENCE_DIR}"
+test -d "${SRA_DIR}"
+test -d "${SCRATCH_ROOT}"
+test -w "${SCRATCH_ROOT}"
+test -w "${NXF_WORK}"
+test -w "${TMPDIR}"
+
+printf 'Node: %s\n' "$(hostname)"
+printf 'Started: %s\n' "$(date --iso-8601=seconds)"
+printf 'Project directory: %s\n' "${WORKDIR}"
+printf 'Nextflow work directory: %s\n' "${NXF_WORK}"
+printf 'Temporary directory: %s\n' "${NXF_TMP}"
+
+df -h "${WORKDIR}" "${SCRATCH_ROOT}"
+df -ih "${WORKDIR}" "${SCRATCH_ROOT}"
+
 command -v singularity
 singularity --version
-"$NEXTFLOW" -version
+"${NEXTFLOW}" -version
 
-GENOME="$REFERENCE_DIR/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz"
-GTF="$REFERENCE_DIR/Homo_sapiens.GRCh38.111.gtf.gz"
-VEP="$REFERENCE_DIR/homo_sapiens_vep_111_GRCh38.tar.gz"
-PROTEOME="$REFERENCE_DIR/human_reviewed_isoforms.fasta.gz"
-ARRIBA="$REFERENCE_DIR/arriba_v2.4.0.tar.gz"
-
-"$NEXTFLOW" run main.nf \
+"${NEXTFLOW}" run "${WORKDIR}/main.nf" \
     -ansi-log false \
     -with-singularity \
     -process.executor slurm \
-    "-process.clusterOptions=--account=$PROJECT_ID" \
-    -work-dir "$NXF_WORK" \
-    --sra_dir "$SRA_DIR" \
-    --genome_url "file://$GENOME" \
-    --gtf_url "file://$GTF" \
-    --vep_cache_url "file://$VEP" \
-    --proteome_url "file://$PROTEOME" \
-    --arriba_url "file://$ARRIBA" \
-    -with-report "results/pipeline_report-${RUN_ID}.html" \
-    -with-timeline "results/pipeline_timeline-${RUN_ID}.html" \
-    -with-trace "results/pipeline_trace-${RUN_ID}.tsv" \
-    -resume
+    "-process.clusterOptions=--account=${PROJECT_ID}" \
+    -work-dir "${NXF_WORK}" \
+    --sra_dir "${SRA_DIR}" \
+    -with-report "${WORKDIR}/results/pipeline_report-${RUN_ID}.html" \
+    -with-timeline "${WORKDIR}/results/pipeline_timeline-${RUN_ID}.html" \
+    -with-trace "${WORKDIR}/results/pipeline_trace-${RUN_ID}.tsv"
+
+printf 'Finished: %s\n' "$(date --iso-8601=seconds)"
+#dos2unix scratch.slurm validate_pipeline_commands.sh main.nf
+#bash validate_pipeline_commands.sh
+#sbatch --test-only scratch.slurm
+#JOBID=$(sbatch --parsable scratch.slurm)
+#echo "$JOBID"
+#while [[ ! -f "resultsTKvep-${JOBID}.log" ]]; do sleep 2 done
+#tail -f "resultsTKvep-${JOBID}.log"

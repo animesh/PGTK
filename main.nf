@@ -10,9 +10,11 @@ params.fusion_flank_aa = 50
 params.splice_min_coverage = 2.5
 params.splice_min_junction_reads = 3
 params.splice_min_isoform_fraction = 0.05
-params.splice_min_protein_aa = 30
+params.splice_min_protein_aa = 60
+params.splice_class_codes = 'j,u'
 params.genome_url = 'https://ftp.ensembl.org/pub/release-111/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz'
 params.gtf_url = 'https://ftp.ensembl.org/pub/release-111/gtf/homo_sapiens/Homo_sapiens.GRCh38.111.gtf.gz'
+params.cdna_url = 'https://ftp.ensembl.org/pub/release-111/fasta/homo_sapiens/cdna/Homo_sapiens.GRCh38.cdna.all.fa.gz'
 params.vep_cache_url = 'https://ftp.ensembl.org/pub/release-111/variation/indexed_vep_cache/homo_sapiens_vep_111_GRCh38.tar.gz'
 params.proteome_url = 'https://rest.uniprot.org/uniprotkb/stream?compressed=true&format=fasta&includeIsoform=true&query=%28proteome%3AUP000005640%29+AND+%28reviewed%3Atrue%29'
 params.arriba_url = 'https://github.com/suhrig/arriba/releases/download/v2.4.0/arriba_v2.4.0.tar.gz'
@@ -24,6 +26,7 @@ process DOWNLOAD_REFERENCES {
     output:
     path 'refs/genome.fa', emit: genome
     path 'refs/genes.gtf', emit: gtf
+    path 'refs/cdna.fa', emit: cdna
     path 'refs/human_reviewed_isoforms.fasta', emit: proteome
     path 'refs/vep_cache', emit: vep_cache
     path 'refs/arriba_blacklist.tsv.gz', emit: blacklist
@@ -32,20 +35,38 @@ process DOWNLOAD_REFERENCES {
     script:
     """
     set -euo pipefail
-    command -v curl >/dev/null; command -v gzip >/dev/null; command -v tar >/dev/null
+
+    REFERENCE_DOWNLOADS='${projectDir}/reference_downloads'
+
+    test -s "\${REFERENCE_DOWNLOADS}/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz"
+    test -s "\${REFERENCE_DOWNLOADS}/Homo_sapiens.GRCh38.111.gtf.gz"
+    test -s "\${REFERENCE_DOWNLOADS}/Homo_sapiens.GRCh38.cdna.all.fa.gz"
+    test -s "\${REFERENCE_DOWNLOADS}/human_reviewed_isoforms.fasta.gz"
+    test -s "\${REFERENCE_DOWNLOADS}/homo_sapiens_vep_111_GRCh38.tar.gz"
+    test -s "\${REFERENCE_DOWNLOADS}/arriba_v2.4.0.tar.gz"
+
     mkdir -p refs/vep_cache refs/arriba_unpack
-    curl -fL --retry 5 '${params.genome_url}' | gzip -dc > refs/genome.fa
-    curl -fL --retry 5 '${params.gtf_url}' | gzip -dc > refs/genes.gtf
-    curl -fL --retry 5 '${params.proteome_url}' | gzip -dc > refs/human_reviewed_isoforms.fasta
-    curl -fL --retry 5 '${params.vep_cache_url}' -o vep.tar.gz
-    tar -xzf vep.tar.gz -C refs/vep_cache
-    curl -fL --retry 5 '${params.arriba_url}' -o arriba.tar.gz
-    tar -xzf arriba.tar.gz -C refs/arriba_unpack
-    cp \$(find refs/arriba_unpack -type f -name 'blacklist_hg38_GRCh38*.tsv.gz' | head -1) refs/arriba_blacklist.tsv.gz
-    cp \$(find refs/arriba_unpack -type f -name 'known_fusions_hg38_GRCh38*.tsv.gz' | head -1) refs/arriba_known_fusions.tsv.gz
-    cp \$(find refs/arriba_unpack -type f -name 'protein_domains_hg38_GRCh38*.gff3' | head -1) refs/arriba_protein_domains.gff3
-    test -s refs/genome.fa; test -s refs/genes.gtf; test -s refs/human_reviewed_isoforms.fasta
+
+    gzip -dc "\${REFERENCE_DOWNLOADS}/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz" > refs/genome.fa
+    gzip -dc "\${REFERENCE_DOWNLOADS}/Homo_sapiens.GRCh38.111.gtf.gz" > refs/genes.gtf
+    gzip -dc "\${REFERENCE_DOWNLOADS}/Homo_sapiens.GRCh38.cdna.all.fa.gz" > refs/cdna.fa
+    gzip -dc "\${REFERENCE_DOWNLOADS}/human_reviewed_isoforms.fasta.gz" > refs/human_reviewed_isoforms.fasta
+
+    tar -xzf "\${REFERENCE_DOWNLOADS}/homo_sapiens_vep_111_GRCh38.tar.gz" -C refs/vep_cache
+    tar -xzf "\${REFERENCE_DOWNLOADS}/arriba_v2.4.0.tar.gz" -C refs/arriba_unpack
+
+    cp \$(find refs/arriba_unpack -type f -name 'blacklist_hg38_GRCh38*.tsv.gz' -print -quit) refs/arriba_blacklist.tsv.gz
+    cp \$(find refs/arriba_unpack -type f -name 'known_fusions_hg38_GRCh38*.tsv.gz' -print -quit) refs/arriba_known_fusions.tsv.gz
+    cp \$(find refs/arriba_unpack -type f -name 'protein_domains_hg38_GRCh38*.gff3' -print -quit) refs/arriba_protein_domains.gff3
+
+    test -s refs/genome.fa
+    test -s refs/genes.gtf
+    test -s refs/cdna.fa
+    test -s refs/human_reviewed_isoforms.fasta
     test -d refs/vep_cache/homo_sapiens/111_GRCh38
+    test -s refs/arriba_blacklist.tsv.gz
+    test -s refs/arriba_known_fusions.tsv.gz
+    test -s refs/arriba_protein_domains.gff3
     """
 }
 
@@ -58,8 +79,27 @@ process SRA_TO_FASTQ {
     script:
     """
     set -euo pipefail
-    fasterq-dump --split-files --threads ${task.cpus} ${sra_file}
-    gzip ${srr}_1.fastq ${srr}_2.fastq
+
+    mkdir -p fasterq_tmp
+
+    fasterq-dump \
+        --verbose \
+        --details \
+        --split-files \
+        --threads ${task.cpus} \
+        --temp fasterq_tmp \
+        --outdir . \
+        ${sra_file}
+
+    test -s ${srr}_1.fastq
+    test -s ${srr}_2.fastq
+
+    gzip -1 ${srr}_1.fastq ${srr}_2.fastq
+
+    test -s ${srr}_1.fastq.gz
+    test -s ${srr}_2.fastq.gz
+
+    rm -rf fasterq_tmp
     """
 }
 
@@ -138,7 +178,6 @@ process STAR_INDEX {
     """
 }
 
-
 process STAR_ALIGN {
     tag "${meta.sample}"
     cpus 32; memory '256 GB'; time '24h'; disk '320 GB'; queue 'bigmem'
@@ -213,11 +252,14 @@ process REF_INDEX {
     output: tuple path('genome.fa'), path('genome.fa.fai'), path('genome.dict')
     script:
     """
+    set -euo pipefail
     samtools faidx genome.fa
     samtools dict -o genome.dict genome.fa
+    test -s genome.fa
+    test -s genome.fa.fai
+    test -s genome.dict
     """
 }
-
 process MARK_DUPLICATES {
     tag "${meta.sample}"; cpus 4; memory '16 GB'; time '24h'; disk '200 GB'; queue 'normal'
     container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
@@ -299,11 +341,22 @@ process PYPGATK_FASTA {
     tag "${meta.sample}"; cpus 2; memory '12 GB'; time '12h'; disk '40 GB'; queue 'normal'
     container 'quay.io/biocontainers/pypgatk:0.0.24--pyhdfd78af_0'
     publishDir "${params.outdir}/variant_fasta", mode:'copy'
-    input: tuple val(meta), path(vcf), path(tbi); path gtf; path proteome
+    input: tuple val(meta), path(vcf), path(tbi); path gtf; path cdna
     output: tuple val(meta), path("${meta.sample}.variant_proteins.fasta")
     script:
     """
-    pypgatk vcf-to-proteindb --input-vcf ${vcf} --gene-annotations-gtf ${gtf} --protein-db-fasta ${proteome} --af-field AF --annotation-field-name CSQ --consequence-filter missense_variant,frameshift_variant,stop_gained,stop_lost,start_lost,splice_donor_variant,splice_acceptor_variant,inframe_insertion,inframe_deletion --output-proteindb ${meta.sample}.variant_proteins.fasta
+    set -euo pipefail
+
+    pypgatk vcf-to-proteindb \
+        --vcf ${vcf} \
+        --input_fasta ${cdna} \
+        --gene_annotations_gtf ${gtf} \
+        --annotation_field_name CSQ \
+        --af_field AF \
+        --include_consequences missense_variant,frameshift_variant,stop_gained,stop_lost,start_lost,splice_donor_variant,splice_acceptor_variant,inframe_insertion,inframe_deletion \
+        --output_proteindb ${meta.sample}.variant_proteins.fasta
+
+    test -s ${meta.sample}.variant_proteins.fasta
     sed -i 's/^>/>${meta.sample}|/' ${meta.sample}.variant_proteins.fasta
     """
 }
@@ -366,29 +419,102 @@ process STRINGTIE_ASSEMBLY {
     """
 }
 
+process GFFCOMPARE_NOVEL {
+    tag "${meta.sample}"
+    cpus 2; memory '8 GB'; time '8h'; disk '30 GB'; queue 'normal'
+    container "${projectDir}/singularity_cache/gffcompare-0.12.10.img"
+    publishDir "${params.outdir}/splicing/gffcompare", mode:'copy'
+    input:
+    tuple val(meta), path(assembled_gtf)
+    path reference_gtf
+    output:
+    tuple val(meta), path("${meta.sample}.novel.gtf"), emit: novel
+    tuple val(meta), path("${meta.sample}.gffcompare.annotated.gtf"), emit: annotated
+    path "${meta.sample}.gffcompare.stats", emit: stats
+    script:
+    """
+    set -euo pipefail
+
+    gffcompare \\
+        -r ${reference_gtf} \\
+        -o ${meta.sample}.gffcompare \\
+        ${assembled_gtf}
+
+    cp ${meta.sample}.gffcompare.annotated.gtf \\
+       ${meta.sample}.gffcompare.annotated.source.gtf
+
+    awk -v allowed='${params.splice_class_codes}' '
+        BEGIN {
+            count = split(allowed, values, ",")
+            for (i = 1; i <= count; i++) keep_code[values[i]] = 1
+        }
+        \$3 == "transcript" {
+            transcript = ""
+            code = ""
+            if (match(\$0, /transcript_id "[^"]+"/))
+                transcript = substr(\$0, RSTART + 15, RLENGTH - 16)
+            if (match(\$0, /class_code "[^"]+"/))
+                code = substr(\$0, RSTART + 12, RLENGTH - 13)
+            selected[transcript] = keep_code[code]
+        }
+        {
+            transcript = ""
+            if (match(\$0, /transcript_id "[^"]+"/))
+                transcript = substr(\$0, RSTART + 15, RLENGTH - 16)
+            if (selected[transcript]) print
+        }
+    ' ${meta.sample}.gffcompare.annotated.source.gtf \\
+      > ${meta.sample}.novel.gtf
+
+    mv ${meta.sample}.gffcompare.annotated.source.gtf \\
+       ${meta.sample}.gffcompare.annotated.gtf
+
+    test -s ${meta.sample}.gffcompare.annotated.gtf
+    test -s ${meta.sample}.gffcompare.stats
+    """
+}
+
 process SPLICE_PROTEIN_FASTA {
     tag "${meta.sample}"
     cpus 8; memory '16 GB'; time '24h'; disk '60 GB'; queue 'normal'
     container "${projectDir}/singularity_cache/transdecoder-6.0.0.img"
     publishDir "${params.outdir}/splice_fasta", mode:'copy'
-    input: tuple val(meta), path(assembled_gtf); path genome
+    input: tuple val(meta), path(novel_gtf); path genome
     output: tuple val(meta), path("${meta.sample}.splice_proteins.fasta")
     script:
     """
     set -euo pipefail
-    gtf_genome_to_cdna_fasta.pl ${assembled_gtf} ${genome} > ${meta.sample}.transcripts.fasta
-    test -s ${meta.sample}.transcripts.fasta
 
-    TransDecoder.LongOrfs \\
+    if [[ ! -s ${novel_gtf} ]]; then
+        : > ${meta.sample}.splice_proteins.fasta
+        exit 0
+    fi
+
+    /usr/local/opt/transdecoder/util/gtf_genome_to_cdna_fasta.pl \\
+        ${novel_gtf} \\
+        ${genome} \\
+        > ${meta.sample}.transcripts.fasta
+
+    if [[ ! -s ${meta.sample}.transcripts.fasta ]]; then
+        : > ${meta.sample}.splice_proteins.fasta
+        exit 0
+    fi
+
+    /usr/local/opt/transdecoder/util/TransDecoder.LongOrfs \\
         -t ${meta.sample}.transcripts.fasta \\
+        -m ${params.splice_min_protein_aa} \\
         --output_dir transdecoder
 
-    TransDecoder.Predict \\
+    /usr/local/opt/transdecoder/util/TransDecoder.Predict \\
         -t ${meta.sample}.transcripts.fasta \\
         --output_dir transdecoder
 
     peptide_file=\$(find transdecoder -type f -name '*.transdecoder.pep' -print -quit)
-    test -s "\$peptide_file"
+
+    if [[ -z "\${peptide_file}" || ! -s "\${peptide_file}" ]]; then
+        : > ${meta.sample}.splice_proteins.fasta
+        exit 0
+    fi
 
     awk -v sample='${meta.sample}' -v min_aa='${params.splice_min_protein_aa}' '
         /^>/ {
@@ -407,9 +533,7 @@ process SPLICE_PROTEIN_FASTA {
                 print sequence
             }
         }
-    ' "\$peptide_file" > ${meta.sample}.splice_proteins.fasta
-
-    test -s ${meta.sample}.splice_proteins.fasta
+    ' "\${peptide_file}" > ${meta.sample}.splice_proteins.fasta
     """
 }
 
@@ -468,11 +592,22 @@ process PROGRESSION_FASTA {
     tag "${meta.sample}"; cpus 2; memory '12 GB'; time '12h'; disk '40 GB'; queue 'normal'
     container 'quay.io/biocontainers/pypgatk:0.0.24--pyhdfd78af_0'
     publishDir "${params.outdir}/progression_fasta", mode:'copy'
-    input: tuple val(meta), path(vcf), path(tbi); path gtf; path proteome
+    input: tuple val(meta), path(vcf), path(tbi); path gtf; path cdna
     output: path "${meta.sample}.progression_proteins.fasta"
     script:
     """
-    pypgatk vcf-to-proteindb --input-vcf ${vcf} --gene-annotations-gtf ${gtf} --protein-db-fasta ${proteome} --af-field AF --annotation-field-name CSQ --consequence-filter missense_variant,frameshift_variant,stop_gained,stop_lost,start_lost,splice_donor_variant,splice_acceptor_variant,inframe_insertion,inframe_deletion --output-proteindb ${meta.sample}.progression_proteins.fasta
+    set -euo pipefail
+
+    pypgatk vcf-to-proteindb \
+        --vcf ${vcf} \
+        --input_fasta ${cdna} \
+        --gene_annotations_gtf ${gtf} \
+        --annotation_field_name CSQ \
+        --af_field AF \
+        --include_consequences missense_variant,frameshift_variant,stop_gained,stop_lost,start_lost,splice_donor_variant,splice_acceptor_variant,inframe_insertion,inframe_deletion \
+        --output_proteindb ${meta.sample}.progression_proteins.fasta
+
+    test -s ${meta.sample}.progression_proteins.fasta
     sed -i 's/^>/>${meta.sample}|PROGRESSION|/' ${meta.sample}.progression_proteins.fasta
     """
 }
@@ -519,7 +654,8 @@ workflow {
     fusion_fasta=FUSION_FASTA(arriba_result.accepted)
     sortedbam=SORT_INDEX_BAM(star_result.bam)
     assembled=STRINGTIE_ASSEMBLY(sortedbam,refs.gtf)
-    splice_fasta=SPLICE_PROTEIN_FASTA(assembled,refs.genome)
+    novel_result=GFFCOMPARE_NOVEL(assembled,refs.gtf)
+    splice_fasta=SPLICE_PROTEIN_FASTA(novel_result.novel,refs.genome)
     flagstat=SAMTOOLS_FLAGSTAT(sortedbam)
     md_result=MARK_DUPLICATES(sortedbam)
     split=SPLIT_N_CIGAR(md_result.bam,ref)
@@ -527,7 +663,7 @@ workflow {
     pass=GENOTYPE_FILTER(gvcf,ref)
     variant_stats=BCFTOOLS_STATS(pass)
     annotated=VEP_ANNOTATE(pass,ref,refs.vep_cache)
-    variant_fasta=PYPGATK_FASTA(annotated,refs.gtf,refs.proteome)
+    variant_fasta=PYPGATK_FASTA(annotated,refs.gtf,refs.cdna)
 
     variant_keyed=variant_fasta.map { m,f -> tuple(m.sample,m,f) }
     fusion_keyed=fusion_fasta.map { m,f -> tuple(m.sample,m,f) }
@@ -541,7 +677,7 @@ workflow {
     bases=groups.baseline.map { m,v,t -> tuple(m.tk,v,t) }
     pairs=groups.progression.map { m,v,t -> tuple(m.tk,m,v,t) }.combine(bases,by:0).map { k,m,pv,pt,bv,bt -> tuple(m,pv,pt,bv,bt) }
     prog=PROGRESSION_SUBTRACT(pairs)
-    PROGRESSION_FASTA(prog,refs.gtf,refs.proteome)
+    PROGRESSION_FASTA(prog,refs.gtf,refs.cdna)
 
     qc_files = raw_qc.qc
         .mix(trimmed_qc.qc, trim_result.reports, star_result.logs,
