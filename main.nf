@@ -6,6 +6,11 @@ params.outdir = "${projectDir}/results"
 params.read_length = 150
 params.skip_trimming = false
 params.sra_dir = "${projectDir}/sra_cache"
+params.fusion_flank_aa = 50
+params.splice_min_coverage = 2.5
+params.splice_min_junction_reads = 3
+params.splice_min_isoform_fraction = 0.05
+params.splice_min_protein_aa = 30
 params.genome_url = 'https://ftp.ensembl.org/pub/release-111/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz'
 params.gtf_url = 'https://ftp.ensembl.org/pub/release-111/gtf/homo_sapiens/Homo_sapiens.GRCh38.111.gtf.gz'
 params.vep_cache_url = 'https://ftp.ensembl.org/pub/release-111/variation/indexed_vep_cache/homo_sapiens_vep_111_GRCh38.tar.gz'
@@ -72,6 +77,21 @@ process CAT_FASTQ {
     """
 }
 
+process FASTQC_RAW {
+    tag "${meta.sample}:raw"
+    cpus 4; memory '8 GB'; time '8h'; disk '100 GB'; queue 'normal'
+    container 'quay.io/biocontainers/fastqc:0.12.1--hdfd78af_0'
+    publishDir "${params.outdir}/qc/fastqc_raw", mode:'copy'
+    input: tuple val(meta), path(r1), path(r2)
+    output:
+    path "${meta.sample}.raw_fastqc", emit: qc
+    script:
+    """
+    mkdir ${meta.sample}.raw_fastqc
+    fastqc --threads ${task.cpus} --outdir ${meta.sample}.raw_fastqc ${r1} ${r2}
+    """
+}
+
 process TRIM_GALORE {
     tag "${meta.sample}"
     cpus 4; memory '8 GB'; time '12h'; disk '150 GB'; queue 'normal'
@@ -89,9 +109,24 @@ process TRIM_GALORE {
     """
 }
 
+process FASTQC_TRIMMED {
+    tag "${meta.sample}:trimmed"
+    cpus 4; memory '8 GB'; time '8h'; disk '100 GB'; queue 'normal'
+    container 'quay.io/biocontainers/fastqc:0.12.1--hdfd78af_0'
+    publishDir "${params.outdir}/qc/fastqc_trimmed", mode:'copy'
+    input: tuple val(meta), path(r1), path(r2)
+    output:
+    path "${meta.sample}.trimmed_fastqc", emit: qc
+    script:
+    """
+    mkdir ${meta.sample}.trimmed_fastqc
+    fastqc --threads ${task.cpus} --outdir ${meta.sample}.trimmed_fastqc ${r1} ${r2}
+    """
+}
+
 process STAR_INDEX {
     tag 'GRCh38_Ensembl111'
-    cpus 32; memory '32 GB'; time '24h'; disk '120 GB'; queue 'bigmem'
+    cpus 8; memory '64 GB'; time '12h'; disk '320 GB'; queue 'normal'
     container 'quay.io/biocontainers/star:2.7.11b--h43eeafb_1'
     publishDir "${params.outdir}/references/star_index", mode:'copy'
     input: path genome; path gtf
@@ -103,12 +138,15 @@ process STAR_INDEX {
     """
 }
 
+
 process STAR_ALIGN {
     tag "${meta.sample}"
-    cpus 32; memory '32 GB'; time '24h'; disk '200 GB'; queue 'bigmem'
+    cpus 32; memory '256 GB'; time '24h'; disk '320 GB'; queue 'bigmem'
     container 'quay.io/biocontainers/star:2.7.11b--h43eeafb_1'
     input: tuple val(meta), path(r1), path(r2); path index
-    output: tuple val(meta), path("${meta.sample}.Aligned.out.bam")
+    output:
+    tuple val(meta), path("${meta.sample}.Aligned.out.bam"), emit: bam
+    path "${meta.sample}.Log.final.out", emit: logs
     script:
     """
     STAR \
@@ -118,7 +156,6 @@ process STAR_ALIGN {
         --runThreadN ${task.cpus} \
         --twopassMode Basic \
         --outFileNamePrefix ${meta.sample}. \
-        --outStd Log \
         --outSAMtype BAM Unsorted \
         --outSAMunmapped Within \
         --outBAMcompression 0 \
@@ -145,7 +182,7 @@ process STAR_ALIGN {
 process SORT_INDEX_BAM {
     tag "${meta.sample}"
     cpus 8; memory '16 GB'; time '24h'; disk '200 GB'; queue 'normal'
-    container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
+    container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
     publishDir "${params.outdir}/bam/star", mode:'copy', pattern:'*.Aligned.sortedByCoord.out.bam*'
     input: tuple val(meta), path(bam)
     output: tuple val(meta), path("${meta.sample}.Aligned.sortedByCoord.out.bam"), path("${meta.sample}.Aligned.sortedByCoord.out.bam.bai")
@@ -156,16 +193,28 @@ process SORT_INDEX_BAM {
     """
 }
 
+process SAMTOOLS_FLAGSTAT {
+    tag "${meta.sample}"
+    cpus 2; memory '8 GB'; time '4h'; disk '20 GB'; queue 'normal'
+    container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
+    publishDir "${params.outdir}/qc/flagstat", mode:'copy'
+    input: tuple val(meta), path(bam), path(bai)
+    output: path "${meta.sample}.flagstat.txt"
+    script:
+    """
+    samtools flagstat -@ ${task.cpus} ${bam} > ${meta.sample}.flagstat.txt
+    """
+}
+
 process REF_INDEX {
     tag 'GRCh38'; cpus 2; memory '8 GB'; time '4h'; disk '30 GB'; queue 'normal'
-    container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
+    container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
     input: path genome
     output: tuple path('genome.fa'), path('genome.fa.fai'), path('genome.dict')
     script:
     """
-    cp ${genome} genome.fa
     samtools faidx genome.fa
-    gatk CreateSequenceDictionary -R genome.fa -O genome.dict
+    samtools dict -o genome.dict genome.fa
     """
 }
 
@@ -173,7 +222,9 @@ process MARK_DUPLICATES {
     tag "${meta.sample}"; cpus 4; memory '16 GB'; time '24h'; disk '200 GB'; queue 'normal'
     container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
     input: tuple val(meta), path(bam), path(bai)
-    output: tuple val(meta), path("${meta.sample}.markdup.bam"), path("${meta.sample}.markdup.bam.bai")
+    output:
+    tuple val(meta), path("${meta.sample}.markdup.bam"), path("${meta.sample}.markdup.bam.bai"), emit: bam
+    path "${meta.sample}.metrics.txt", emit: metrics
     script:
     """
     gatk MarkDuplicates -I ${bam} -O ${meta.sample}.markdup.bam -M ${meta.sample}.metrics.txt --CREATE_INDEX true --VALIDATION_STRINGENCY LENIENT
@@ -218,6 +269,19 @@ process GENOTYPE_FILTER {
     """
 }
 
+process BCFTOOLS_STATS {
+    tag "${meta.sample}"
+    cpus 1; memory '4 GB'; time '4h'; disk '20 GB'; queue 'normal'
+    container 'quay.io/biocontainers/bcftools:1.21--h8b25389_0'
+    publishDir "${params.outdir}/qc/bcftools", mode:'copy'
+    input: tuple val(meta), path(vcf), path(tbi)
+    output: path "${meta.sample}.bcftools.stats.txt"
+    script:
+    """
+    bcftools stats ${vcf} > ${meta.sample}.bcftools.stats.txt
+    """
+}
+
 process VEP_ANNOTATE {
     tag "${meta.sample}"; cpus 10; memory '16 GB'; time '24h'; disk '60 GB'; queue 'normal'
     container 'quay.io/biocontainers/ensembl-vep:111.0--pl5321h2a3209d_0'
@@ -226,7 +290,7 @@ process VEP_ANNOTATE {
     output: tuple val(meta), path("${meta.sample}.vep.vcf.gz"), path("${meta.sample}.vep.vcf.gz.tbi")
     script:
     """
-    vep --input_file ${vcf} --output_file ${meta.sample}.vep.vcf --format vcf --vcf --cache --offline --cache_version 111 --dir_cache ${cache} --species homo_sapiens --assembly GRCh38 --fasta ${genome} --pick --canonical --protein --symbol --numbers --biotype --total_length --hgvs --fork ${task.cpus} --force_overwrite
+    vep --input_file ${vcf} --output_file ${meta.sample}.vep.vcf --format vcf --vcf --cache --offline --cache_version 111 --dir_cache ${cache} --species homo_sapiens --assembly GRCh38 --fasta ${genome} --canonical --protein --symbol --numbers --biotype --total_length --hgvs --fork ${task.cpus} --force_overwrite
     bgzip ${meta.sample}.vep.vcf && tabix -p vcf ${meta.sample}.vep.vcf.gz
     """
 }
@@ -249,10 +313,141 @@ process ARRIBA {
     container 'quay.io/biocontainers/arriba:2.4.0--h0033a41_2'
     publishDir "${params.outdir}/fusions", mode:'copy'
     input: tuple val(meta), path(bam); path genome; path gtf; path blacklist; path known; path domains
-    output: tuple val(meta), path("${meta.sample}.fusions.tsv"); path "${meta.sample}.fusions.discarded.tsv"
+    output:
+    tuple val(meta), path("${meta.sample}.fusions.tsv"), emit: accepted
+    path "${meta.sample}.fusions.discarded.tsv", emit: discarded
     script:
     """
     arriba -x ${bam} -a ${genome} -g ${gtf} -b ${blacklist} -k ${known} -p ${domains} -o ${meta.sample}.fusions.tsv -O ${meta.sample}.fusions.discarded.tsv
+    """
+}
+
+process FUSION_FASTA {
+    tag "${meta.sample}"
+    cpus 2; memory '8 GB'; time '8h'; disk '20 GB'; queue 'normal'
+    container "${projectDir}/singularity_cache/pvactools-7.1.1.img"
+    publishDir "${params.outdir}/fusion_fasta", mode:'copy'
+    input: tuple val(meta), path(fusions)
+    output: tuple val(meta), path("${meta.sample}.fusion_proteins.fasta")
+    script:
+    """
+    set -euo pipefail
+    if awk 'END { exit !(NR > 1) }' ${fusions}; then
+        pvacfuse generate_protein_fasta \\
+            --downstream-sequence-length full \\
+            ${fusions} \\
+            ${params.fusion_flank_aa} \\
+            ${meta.sample}.fusion_proteins.fasta
+        sed -i 's/^>/>${meta.sample}|FUSION|/' ${meta.sample}.fusion_proteins.fasta
+    else
+        : > ${meta.sample}.fusion_proteins.fasta
+    fi
+    """
+}
+
+process STRINGTIE_ASSEMBLY {
+    tag "${meta.sample}"
+    cpus 8; memory '16 GB'; time '24h'; disk '80 GB'; queue 'normal'
+    container "${projectDir}/singularity_cache/stringtie-3.0.3.img"
+    publishDir "${params.outdir}/splicing/stringtie", mode:'copy'
+    input: tuple val(meta), path(bam), path(bai); path gtf
+    output: tuple val(meta), path("${meta.sample}.assembled.gtf")
+    script:
+    """
+    set -euo pipefail
+    stringtie ${bam} \\
+        -G ${gtf} \\
+        -p ${task.cpus} \\
+        -c ${params.splice_min_coverage} \\
+        -f ${params.splice_min_isoform_fraction} \\
+        -j ${params.splice_min_junction_reads} \\
+        -o ${meta.sample}.assembled.gtf
+    test -s ${meta.sample}.assembled.gtf
+    """
+}
+
+process SPLICE_PROTEIN_FASTA {
+    tag "${meta.sample}"
+    cpus 8; memory '16 GB'; time '24h'; disk '60 GB'; queue 'normal'
+    container "${projectDir}/singularity_cache/transdecoder-6.0.0.img"
+    publishDir "${params.outdir}/splice_fasta", mode:'copy'
+    input: tuple val(meta), path(assembled_gtf); path genome
+    output: tuple val(meta), path("${meta.sample}.splice_proteins.fasta")
+    script:
+    """
+    set -euo pipefail
+    gtf_genome_to_cdna_fasta.pl ${assembled_gtf} ${genome} > ${meta.sample}.transcripts.fasta
+    test -s ${meta.sample}.transcripts.fasta
+
+    TransDecoder.LongOrfs \\
+        -t ${meta.sample}.transcripts.fasta \\
+        --output_dir transdecoder
+
+    TransDecoder.Predict \\
+        -t ${meta.sample}.transcripts.fasta \\
+        --output_dir transdecoder
+
+    peptide_file=\$(find transdecoder -type f -name '*.transdecoder.pep' -print -quit)
+    test -s "\$peptide_file"
+
+    awk -v sample='${meta.sample}' -v min_aa='${params.splice_min_protein_aa}' '
+        /^>/ {
+            if (sequence != "" && length(sequence) >= min_aa && !seen[sequence]++) {
+                print ">" sample "|SPLICE|" header
+                print sequence
+            }
+            header = substr(\$0, 2)
+            sequence = ""
+            next
+        }
+        { sequence = sequence \$0 }
+        END {
+            if (sequence != "" && length(sequence) >= min_aa && !seen[sequence]++) {
+                print ">" sample "|SPLICE|" header
+                print sequence
+            }
+        }
+    ' "\$peptide_file" > ${meta.sample}.splice_proteins.fasta
+
+    test -s ${meta.sample}.splice_proteins.fasta
+    """
+}
+
+process COMBINE_PROTEIN_FASTA {
+    tag "${meta.sample}"
+    cpus 1; memory '4 GB'; time '4h'; disk '30 GB'; queue 'normal'
+    publishDir "${params.outdir}/combined_fasta", mode:'copy'
+    input:
+    tuple val(meta), path(variant_fasta), path(fusion_fasta), path(splice_fasta)
+    path proteome
+    output: tuple val(meta), path("${meta.sample}.exploratory_proteogenomics.fasta")
+    script:
+    """
+    set -euo pipefail
+    cat ${proteome} ${variant_fasta} ${fusion_fasta} ${splice_fasta} \\
+        > ${meta.sample}.combined.raw.fasta
+
+    awk '
+        /^>/ {
+            if (sequence != "" && !seen[sequence]++) {
+                print header
+                print sequence
+            }
+            header = \$0
+            sequence = ""
+            next
+        }
+        { sequence = sequence \$0 }
+        END {
+            if (sequence != "" && !seen[sequence]++) {
+                print header
+                print sequence
+            }
+        }
+    ' ${meta.sample}.combined.raw.fasta \\
+        > ${meta.sample}.exploratory_proteogenomics.fasta
+
+    test -s ${meta.sample}.exploratory_proteogenomics.fasta
     """
 }
 
@@ -282,6 +477,26 @@ process PROGRESSION_FASTA {
     """
 }
 
+process MULTIQC {
+    tag 'final_report'
+    cpus 2; memory '8 GB'; time '4h'; disk '40 GB'; queue 'normal'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/multiqc", mode:'copy'
+    input: path qc_files
+    output:
+    path 'multiqc_report.html'
+    path 'multiqc_data'
+    script:
+    """
+    multiqc . \
+        --force \
+        --title 'PGTK RNA Proteogenomics QC' \
+        --filename multiqc_report.html \
+        --data-dir \
+        --data-format tsv
+    """
+}
+
 workflow {
     samples = channel.fromPath(params.samplesheet, checkIfExists:true).splitCsv(header:true).map { row ->
         if (!row.sample || !row.srr || !row.TK || !row.Group) error 'samples.csv requires sample,srr,TK,Group,baseline'
@@ -295,19 +510,42 @@ workflow {
     staridx=STAR_INDEX(refs.genome,refs.gtf)
     downloaded=SRA_TO_FASTQ(samples)
     reads=downloaded.map { m,r1,r2 -> tuple(m.sample,m,r1,r2) }.groupTuple(by:0).map { id,ms,r1s,r2s -> tuple(ms[0],r1s,r2s) } | CAT_FASTQ
-    trimmed=params.skip_trimming ? reads : TRIM_GALORE(reads).reads
-    starbam=STAR_ALIGN(trimmed,staridx)
-    ARRIBA(starbam,refs.genome,refs.gtf,refs.blacklist,refs.known,refs.domains)
-    sortedbam=SORT_INDEX_BAM(starbam)
-    md=MARK_DUPLICATES(sortedbam)
-    split=SPLIT_N_CIGAR(md,ref)
+    raw_qc=FASTQC_RAW(reads)
+    trim_result=TRIM_GALORE(reads)
+    trimmed=params.skip_trimming ? reads : trim_result.reads
+    trimmed_qc=FASTQC_TRIMMED(trimmed)
+    star_result=STAR_ALIGN(trimmed,staridx)
+    arriba_result=ARRIBA(star_result.bam,refs.genome,refs.gtf,refs.blacklist,refs.known,refs.domains)
+    fusion_fasta=FUSION_FASTA(arriba_result.accepted)
+    sortedbam=SORT_INDEX_BAM(star_result.bam)
+    assembled=STRINGTIE_ASSEMBLY(sortedbam,refs.gtf)
+    splice_fasta=SPLICE_PROTEIN_FASTA(assembled,refs.genome)
+    flagstat=SAMTOOLS_FLAGSTAT(sortedbam)
+    md_result=MARK_DUPLICATES(sortedbam)
+    split=SPLIT_N_CIGAR(md_result.bam,ref)
     gvcf=HAPLOTYPE_CALLER(split,ref)
     pass=GENOTYPE_FILTER(gvcf,ref)
+    variant_stats=BCFTOOLS_STATS(pass)
     annotated=VEP_ANNOTATE(pass,ref,refs.vep_cache)
-    PYPGATK_FASTA(annotated,refs.gtf,refs.proteome)
+    variant_fasta=PYPGATK_FASTA(annotated,refs.gtf,refs.proteome)
+
+    variant_keyed=variant_fasta.map { m,f -> tuple(m.sample,m,f) }
+    fusion_keyed=fusion_fasta.map { m,f -> tuple(m.sample,m,f) }
+    splice_keyed=splice_fasta.map { m,f -> tuple(m.sample,m,f) }
+    combined_inputs=variant_keyed
+        .join(fusion_keyed)
+        .join(splice_keyed)
+        .map { sample,m1,vf,m2,ff,m3,sf -> tuple(m1,vf,ff,sf) }
+    COMBINE_PROTEIN_FASTA(combined_inputs,refs.proteome)
     groups=annotated.branch { m,v,t -> baseline:m.baseline=='true'; progression:m.baseline=='false'; other:true }
     bases=groups.baseline.map { m,v,t -> tuple(m.tk,v,t) }
     pairs=groups.progression.map { m,v,t -> tuple(m.tk,m,v,t) }.combine(bases,by:0).map { k,m,pv,pt,bv,bt -> tuple(m,pv,pt,bv,bt) }
     prog=PROGRESSION_SUBTRACT(pairs)
     PROGRESSION_FASTA(prog,refs.gtf,refs.proteome)
+
+    qc_files = raw_qc.qc
+        .mix(trimmed_qc.qc, trim_result.reports, star_result.logs,
+             flagstat, md_result.metrics, variant_stats)
+        .collect()
+    MULTIQC(qc_files)
 }
