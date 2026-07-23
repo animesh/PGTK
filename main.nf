@@ -12,17 +12,10 @@ params.splice_min_junction_reads = 3
 params.splice_min_isoform_fraction = 0.05
 params.splice_min_protein_aa = 60
 params.splice_class_codes = 'j,u'
-params.genome_url = 'https://ftp.ensembl.org/pub/release-111/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz'
-params.gtf_url = 'https://ftp.ensembl.org/pub/release-111/gtf/homo_sapiens/Homo_sapiens.GRCh38.111.gtf.gz'
-params.cdna_url = 'https://ftp.ensembl.org/pub/release-111/fasta/homo_sapiens/cdna/Homo_sapiens.GRCh38.cdna.all.fa.gz'
-params.vep_cache_url = 'https://ftp.ensembl.org/pub/release-111/variation/indexed_vep_cache/homo_sapiens_vep_111_GRCh38.tar.gz'
-params.proteome_url = 'https://rest.uniprot.org/uniprotkb/stream?compressed=true&format=fasta&includeIsoform=true&query=%28proteome%3AUP000005640%29+AND+%28reviewed%3Atrue%29'
-params.arriba_url = 'https://github.com/suhrig/arriba/releases/download/v2.4.0/arriba_v2.4.0.tar.gz'
 
 process DOWNLOAD_REFERENCES {
     tag 'GRCh38_Ensembl111'
-    cpus 2; memory '8 GB'; time '12h'; disk '100 GB'; queue 'normal'
-    publishDir "${params.outdir}/references", mode: 'copy'
+    cpus 8; memory '32 GB'; time '12h'; disk '100 GB'; queue 'normal'
     output:
     path 'refs/genome.fa', emit: genome
     path 'refs/genes.gtf', emit: gtf
@@ -72,7 +65,7 @@ process DOWNLOAD_REFERENCES {
 
 process SRA_TO_FASTQ {
     tag "${meta.sample}:${srr}"
-    cpus 8; memory '16 GB'; time '24h'; disk '150 GB'; queue 'normal'
+    cpus 16; memory '32 GB'; time '24h'; disk '150 GB'; queue 'normal'
     container 'quay.io/biocontainers/sra-tools:3.2.1--h4304569_0'
     input: tuple val(meta), val(srr), path(sra_file)
     output: tuple val(meta), path("${srr}_1.fastq.gz"), path("${srr}_2.fastq.gz")
@@ -105,7 +98,7 @@ process SRA_TO_FASTQ {
 
 process CAT_FASTQ {
     tag "${meta.sample}"
-    cpus 1; memory '2 GB'; time '4h'; disk '200 GB'; queue 'normal'
+    cpus 2; memory '8 GB'; time '4h'; disk '200 GB'; queue 'normal'
     input: tuple val(meta), path(r1s), path(r2s)
     output: tuple val(meta), path("${meta.sample}_R1.fastq.gz"), path("${meta.sample}_R2.fastq.gz")
     script:
@@ -119,7 +112,7 @@ process CAT_FASTQ {
 
 process FASTQC_RAW {
     tag "${meta.sample}:raw"
-    cpus 4; memory '8 GB'; time '8h'; disk '100 GB'; queue 'normal'
+    cpus 8; memory '16 GB'; time '8h'; disk '100 GB'; queue 'normal'
     container 'quay.io/biocontainers/fastqc:0.12.1--hdfd78af_0'
     publishDir "${params.outdir}/qc/fastqc_raw", mode:'copy'
     input: tuple val(meta), path(r1), path(r2)
@@ -134,7 +127,7 @@ process FASTQC_RAW {
 
 process TRIM_GALORE {
     tag "${meta.sample}"
-    cpus 4; memory '8 GB'; time '12h'; disk '150 GB'; queue 'normal'
+    cpus 8; memory '16 GB'; time '12h'; disk '150 GB'; queue 'normal'
     container 'quay.io/biocontainers/trim-galore:0.6.10--hdfd78af_0'
     publishDir "${params.outdir}/qc/trim_galore", mode:'copy', pattern:'*_trimming_report.txt'
     input: tuple val(meta), path(r1), path(r2)
@@ -151,7 +144,7 @@ process TRIM_GALORE {
 
 process FASTQC_TRIMMED {
     tag "${meta.sample}:trimmed"
-    cpus 4; memory '8 GB'; time '8h'; disk '100 GB'; queue 'normal'
+    cpus 8; memory '16 GB'; time '8h'; disk '100 GB'; queue 'normal'
     container 'quay.io/biocontainers/fastqc:0.12.1--hdfd78af_0'
     publishDir "${params.outdir}/qc/fastqc_trimmed", mode:'copy'
     input: tuple val(meta), path(r1), path(r2)
@@ -166,9 +159,8 @@ process FASTQC_TRIMMED {
 
 process STAR_INDEX {
     tag 'GRCh38_Ensembl111'
-    cpus 8; memory '64 GB'; time '12h'; disk '320 GB'; queue 'normal'
+    cpus 20; memory '64 GB'; time '12h'; disk '320 GB'; queue 'normal'
     container 'quay.io/biocontainers/star:2.7.11b--h43eeafb_1'
-    publishDir "${params.outdir}/references/star_index", mode:'copy'
     input: path genome; path gtf
     output: path 'star_index'
     script:
@@ -220,7 +212,7 @@ process STAR_ALIGN {
 
 process SORT_INDEX_BAM {
     tag "${meta.sample}"
-    cpus 8; memory '16 GB'; time '24h'; disk '200 GB'; queue 'normal'
+    cpus 20; memory '64 GB'; time '24h'; disk '200 GB'; queue 'normal'
     container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
     publishDir "${params.outdir}/bam/star", mode:'copy', pattern:'*.Aligned.sortedByCoord.out.bam*'
     input: tuple val(meta), path(bam)
@@ -234,7 +226,7 @@ process SORT_INDEX_BAM {
 
 process SAMTOOLS_FLAGSTAT {
     tag "${meta.sample}"
-    cpus 2; memory '8 GB'; time '4h'; disk '20 GB'; queue 'normal'
+    cpus 4; memory '16 GB'; time '4h'; disk '20 GB'; queue 'normal'
     container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
     publishDir "${params.outdir}/qc/flagstat", mode:'copy'
     input: tuple val(meta), path(bam), path(bai)
@@ -246,7 +238,7 @@ process SAMTOOLS_FLAGSTAT {
 }
 
 process REF_INDEX {
-    tag 'GRCh38'; cpus 2; memory '8 GB'; time '4h'; disk '30 GB'; queue 'normal'
+    tag 'GRCh38'; cpus 4; memory '16 GB'; time '4h'; disk '30 GB'; queue 'normal'
     container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
     input: path genome
     output: tuple path('genome.fa'), path('genome.fa.fai'), path('genome.dict')
@@ -261,7 +253,8 @@ process REF_INDEX {
     """
 }
 process MARK_DUPLICATES {
-    tag "${meta.sample}"; cpus 4; memory '16 GB'; time '24h'; disk '200 GB'; queue 'normal'
+    tag "${meta.sample}"
+    cpus 20; memory '64 GB'; time '24h'; disk '200 GB'; queue 'normal'
     container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
     input: tuple val(meta), path(bam), path(bai)
     output:
@@ -269,51 +262,62 @@ process MARK_DUPLICATES {
     path "${meta.sample}.metrics.txt", emit: metrics
     script:
     """
-    gatk MarkDuplicates -I ${bam} -O ${meta.sample}.markdup.bam -M ${meta.sample}.metrics.txt --CREATE_INDEX true --VALIDATION_STRINGENCY LENIENT
+    set -euo pipefail
+    gatk --java-options "-Xms4g -Xmx56g -XX:ParallelGCThreads=20" \
+        MarkDuplicates \
+        -I ${bam} \
+        -O ${meta.sample}.markdup.bam \
+        -M ${meta.sample}.metrics.txt \
+        --CREATE_INDEX true \
+        --VALIDATION_STRINGENCY LENIENT \
+        --MAX_RECORDS_IN_RAM 1000000
     mv ${meta.sample}.markdup.bai ${meta.sample}.markdup.bam.bai
+    test -s ${meta.sample}.markdup.bam
+    test -s ${meta.sample}.markdup.bam.bai
+    test -s ${meta.sample}.metrics.txt
     """
 }
 
 process SPLIT_N_CIGAR {
-    tag "${meta.sample}"; cpus 4; memory '16 GB'; time '24h'; disk '200 GB'; queue 'normal'
+    tag "${meta.sample}"; cpus 20; memory '64 GB'; time '24h'; disk '200 GB'; queue 'normal'
     container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
     input: tuple val(meta), path(bam), path(bai); tuple path(genome), path(fai), path(dict)
     output: tuple val(meta), path("${meta.sample}.split.bam"), path("${meta.sample}.split.bam.bai")
     script:
     """
-    gatk SplitNCigarReads -R ${genome} -I ${bam} -O ${meta.sample}.split.bam --create-output-bam-index true
+    gatk --java-options "-Xms4g -Xmx56g" SplitNCigarReads -R ${genome} -I ${bam} -O ${meta.sample}.split.bam --create-output-bam-index true
     """
 }
 
 process HAPLOTYPE_CALLER {
-    tag "${meta.sample}"; cpus 10; memory '16 GB'; time '48h'; disk '120 GB'; queue 'normal'
+    tag "${meta.sample}"; cpus 20; memory '64 GB'; time '48h'; disk '120 GB'; queue 'normal'
     container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
     publishDir "${params.outdir}/gvcf", mode:'copy'
     input: tuple val(meta), path(bam), path(bai); tuple path(genome), path(fai), path(dict)
     output: tuple val(meta), path("${meta.sample}.g.vcf.gz"), path("${meta.sample}.g.vcf.gz.tbi")
     script:
     """
-    gatk HaplotypeCaller -R ${genome} -I ${bam} -O ${meta.sample}.g.vcf.gz -ERC GVCF --dont-use-soft-clipped-bases true --standard-min-confidence-threshold-for-calling 20 --native-pair-hmm-threads ${task.cpus}
+    gatk --java-options "-Xms4g -Xmx56g" HaplotypeCaller -R ${genome} -I ${bam} -O ${meta.sample}.g.vcf.gz -ERC GVCF --dont-use-soft-clipped-bases true --standard-min-confidence-threshold-for-calling 20 --native-pair-hmm-threads ${task.cpus}
     """
 }
 
 process GENOTYPE_FILTER {
-    tag "${meta.sample}"; cpus 2; memory '12 GB'; time '12h'; disk '40 GB'; queue 'normal'
+    tag "${meta.sample}"; cpus 8; memory '32 GB'; time '12h'; disk '40 GB'; queue 'normal'
     container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
     publishDir "${params.outdir}/vcf_pass", mode:'copy', pattern:'*.pass.vcf.gz*'
     input: tuple val(meta), path(gvcf), path(tbi); tuple path(genome), path(fai), path(dict)
     output: tuple val(meta), path("${meta.sample}.pass.vcf.gz"), path("${meta.sample}.pass.vcf.gz.tbi")
     script:
     """
-    gatk GenotypeGVCFs -R ${genome} -V ${gvcf} -O ${meta.sample}.raw.vcf.gz
-    gatk VariantFiltration -R ${genome} -V ${meta.sample}.raw.vcf.gz --window 35 --cluster 3 --filter-expression 'QD < 2.0' --filter-name QD2 --filter-expression 'FS > 30.0' --filter-name FS30 --filter-expression 'MQ < 40.0' --filter-name MQ40 --filter-expression 'MQRankSum < -12.5' --filter-name MQRankSum-12.5 --filter-expression 'ReadPosRankSum < -8.0' --filter-name ReadPos-8 -O ${meta.sample}.filtered.vcf.gz
-    gatk SelectVariants -R ${genome} -V ${meta.sample}.filtered.vcf.gz --exclude-filtered -O ${meta.sample}.pass.vcf.gz
+    gatk --java-options "-Xms4g -Xmx28g" GenotypeGVCFs -R ${genome} -V ${gvcf} -O ${meta.sample}.raw.vcf.gz
+    gatk --java-options "-Xms4g -Xmx28g" VariantFiltration -R ${genome} -V ${meta.sample}.raw.vcf.gz --window 35 --cluster 3 --filter-expression 'QD < 2.0' --filter-name QD2 --filter-expression 'FS > 30.0' --filter-name FS30 --filter-expression 'MQ < 40.0' --filter-name MQ40 --filter-expression 'MQRankSum < -12.5' --filter-name MQRankSum-12.5 --filter-expression 'ReadPosRankSum < -8.0' --filter-name ReadPos-8 -O ${meta.sample}.filtered.vcf.gz
+    gatk --java-options "-Xms4g -Xmx28g" SelectVariants -R ${genome} -V ${meta.sample}.filtered.vcf.gz --exclude-filtered -O ${meta.sample}.pass.vcf.gz
     """
 }
 
 process BCFTOOLS_STATS {
     tag "${meta.sample}"
-    cpus 1; memory '4 GB'; time '4h'; disk '20 GB'; queue 'normal'
+    cpus 2; memory '8 GB'; time '4h'; disk '20 GB'; queue 'normal'
     container 'quay.io/biocontainers/bcftools:1.21--h8b25389_0'
     publishDir "${params.outdir}/qc/bcftools", mode:'copy'
     input: tuple val(meta), path(vcf), path(tbi)
@@ -325,7 +329,7 @@ process BCFTOOLS_STATS {
 }
 
 process VEP_ANNOTATE {
-    tag "${meta.sample}"; cpus 10; memory '16 GB'; time '24h'; disk '60 GB'; queue 'normal'
+    tag "${meta.sample}"; cpus 20; memory '64 GB'; time '24h'; disk '60 GB'; queue 'normal'
     container 'quay.io/biocontainers/ensembl-vep:111.0--pl5321h2a3209d_0'
     publishDir "${params.outdir}/vep", mode:'copy'
     input: tuple val(meta), path(vcf), path(tbi); tuple path(genome), path(fai), path(dict); path cache
@@ -338,7 +342,7 @@ process VEP_ANNOTATE {
 }
 
 process PYPGATK_FASTA {
-    tag "${meta.sample}"; cpus 2; memory '12 GB'; time '12h'; disk '40 GB'; queue 'normal'
+    tag "${meta.sample}"; cpus 8; memory '32 GB'; time '12h'; disk '40 GB'; queue 'normal'
     container 'quay.io/biocontainers/pypgatk:0.0.24--pyhdfd78af_0'
     publishDir "${params.outdir}/variant_fasta", mode:'copy'
     input: tuple val(meta), path(vcf), path(tbi); path gtf; path cdna
@@ -362,7 +366,7 @@ process PYPGATK_FASTA {
 }
 
 process ARRIBA {
-    tag "${meta.sample}"; cpus 2; memory '12 GB'; time '12h'; disk '60 GB'; queue 'normal'
+    tag "${meta.sample}"; cpus 8; memory '32 GB'; time '12h'; disk '60 GB'; queue 'normal'
     container 'quay.io/biocontainers/arriba:2.4.0--h0033a41_2'
     publishDir "${params.outdir}/fusions", mode:'copy'
     input: tuple val(meta), path(bam); path genome; path gtf; path blacklist; path known; path domains
@@ -377,7 +381,7 @@ process ARRIBA {
 
 process FUSION_FASTA {
     tag "${meta.sample}"
-    cpus 2; memory '8 GB'; time '8h'; disk '20 GB'; queue 'normal'
+    cpus 4; memory '16 GB'; time '8h'; disk '20 GB'; queue 'normal'
     container "${projectDir}/singularity_cache/pvactools-7.1.1.img"
     publishDir "${params.outdir}/fusion_fasta", mode:'copy'
     input: tuple val(meta), path(fusions)
@@ -400,7 +404,7 @@ process FUSION_FASTA {
 
 process STRINGTIE_ASSEMBLY {
     tag "${meta.sample}"
-    cpus 8; memory '16 GB'; time '24h'; disk '80 GB'; queue 'normal'
+    cpus 20; memory '64 GB'; time '24h'; disk '80 GB'; queue 'normal'
     container "${projectDir}/singularity_cache/stringtie-3.0.3.img"
     publishDir "${params.outdir}/splicing/stringtie", mode:'copy'
     input: tuple val(meta), path(bam), path(bai); path gtf
@@ -421,7 +425,7 @@ process STRINGTIE_ASSEMBLY {
 
 process GFFCOMPARE_NOVEL {
     tag "${meta.sample}"
-    cpus 2; memory '8 GB'; time '8h'; disk '30 GB'; queue 'normal'
+    cpus 4; memory '16 GB'; time '8h'; disk '30 GB'; queue 'normal'
     container "${projectDir}/singularity_cache/gffcompare-0.12.10.img"
     publishDir "${params.outdir}/splicing/gffcompare", mode:'copy'
     input:
@@ -476,7 +480,7 @@ process GFFCOMPARE_NOVEL {
 
 process SPLICE_PROTEIN_FASTA {
     tag "${meta.sample}"
-    cpus 8; memory '16 GB'; time '24h'; disk '60 GB'; queue 'normal'
+    cpus 20; memory '64 GB'; time '24h'; disk '60 GB'; queue 'normal'
     container "${projectDir}/singularity_cache/transdecoder-6.0.0.img"
     publishDir "${params.outdir}/splice_fasta", mode:'copy'
     input: tuple val(meta), path(novel_gtf); path genome
@@ -539,7 +543,7 @@ process SPLICE_PROTEIN_FASTA {
 
 process COMBINE_PROTEIN_FASTA {
     tag "${meta.sample}"
-    cpus 1; memory '4 GB'; time '4h'; disk '30 GB'; queue 'normal'
+    cpus 2; memory '8 GB'; time '4h'; disk '30 GB'; queue 'normal'
     publishDir "${params.outdir}/combined_fasta", mode:'copy'
     input:
     tuple val(meta), path(variant_fasta), path(fusion_fasta), path(splice_fasta)
@@ -576,7 +580,7 @@ process COMBINE_PROTEIN_FASTA {
 }
 
 process PROGRESSION_SUBTRACT {
-    tag "${meta.sample}"; cpus 1; memory '4 GB'; time '4h'; disk '20 GB'; queue 'normal'
+    tag "${meta.sample}"; cpus 2; memory '8 GB'; time '4h'; disk '20 GB'; queue 'normal'
     container 'quay.io/biocontainers/bcftools:1.21--h8b25389_0'
     publishDir "${params.outdir}/progression_vcf", mode:'copy'
     input: tuple val(meta), path(pv), path(pt), path(bv), path(bt)
@@ -589,7 +593,7 @@ process PROGRESSION_SUBTRACT {
 }
 
 process PROGRESSION_FASTA {
-    tag "${meta.sample}"; cpus 2; memory '12 GB'; time '12h'; disk '40 GB'; queue 'normal'
+    tag "${meta.sample}"; cpus 8; memory '32 GB'; time '12h'; disk '40 GB'; queue 'normal'
     container 'quay.io/biocontainers/pypgatk:0.0.24--pyhdfd78af_0'
     publishDir "${params.outdir}/progression_fasta", mode:'copy'
     input: tuple val(meta), path(vcf), path(tbi); path gtf; path cdna
@@ -614,7 +618,7 @@ process PROGRESSION_FASTA {
 
 process MULTIQC {
     tag 'final_report'
-    cpus 2; memory '8 GB'; time '4h'; disk '40 GB'; queue 'normal'
+    cpus 8; memory '32 GB'; time '4h'; disk '40 GB'; queue 'normal'
     container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
     publishDir "${params.outdir}/multiqc", mode:'copy'
     input: path qc_files

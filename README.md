@@ -4,7 +4,7 @@
 
 PGTK, ProteoGenomics TK, supports integrated transcriptomic and proteomic analysis of seven patient-derived multiple myeloma cell lines with a comparatively primary cell-like phenotype.
 
-This repository contains a Nextflow DSL2 workflow for exploratory RNA-seq proteogenomics. It generates sample-specific, progression-specific, fusion-derived, novel-splicing-derived, and combined protein FASTA databases for downstream mass-spectrometry searches.
+This repository contains a Nextflow DSL2 workflow for exploratory RNA-seq proteogenomics. It generates sample-specific, progression-specific, fusion-derived, novel-splicing-derived, progression-specific, and combined protein FASTA databases for downstream mass-spectrometry searches.
 
 The current analysis focuses on the longitudinal TK12, TK13, and TK14 samples. TK12 is treated as the earliest available baseline, while TK13 and TK14 represent later progression samples from the same patient.
 
@@ -26,7 +26,7 @@ Please cite the article when using the associated data, workflow, or results.
 - NCBI BioProject: `PRJNA1176350`
 - Access: https://www.ncbi.nlm.nih.gov/bioproject/1176350
 
-The workflow uses the SRR accessions listed in `samples.csv`. SRA archives are downloaded and validated on the Saga login node, then converted into paired FASTQ files by the Nextflow workflow on compute nodes.
+The workflow uses the SRR accessions listed in `samples.csv`. SRA archives are downloaded and validated on the Saga login node, retained under `sra_cache/`, and converted into paired FASTQ files by Nextflow tasks on compute nodes.
 
 ### Proteomics
 
@@ -44,34 +44,18 @@ wget -r "ftp://ftp.pride.ebi.ac.uk/pride/data/archive/2024/11/PXD033510/"
 
 The workflow is intended for exploratory proteogenomic database construction rather than clinical somatic-mutation classification.
 
-Because no matched normal sample is available, Mutect2 tumor-normal calling is not used. Instead, GATK HaplotypeCaller creates a broad catalogue of expressed per-sample variants after RNA-seq-specific preprocessing. The resulting calls may include germline, clonal, progression-associated, RNA-edited, and technical events. They should not be interpreted as validated somatic mutations without additional evidence.
+Because no matched normal sample is available, Mutect2 tumor-normal calling is not used. GATK HaplotypeCaller instead creates a broad catalogue of expressed per-sample variants after RNA-seq-specific preprocessing. Calls may include germline, clonal, progression-associated, RNA-edited, and technical events. They must not be interpreted as validated somatic mutations without additional evidence.
 
 For exploratory sensitivity, VEP retains consequences for all overlapping transcripts. Neither `--pick` nor `--flag_pick` is used. pypgatk receives the complete CSQ consequence set and uses the Ensembl release 111 cDNA transcript FASTA and matching GTF to generate an expanded transcript-aware variant protein database.
 
-The workflow also generates:
+Additional branches generate:
 
-- Fusion-junction protein sequences from accepted Arriba candidates using pVACfuse
+- Fusion-junction proteins from accepted Arriba candidates using pVACfuse
 - Expressed transcript assemblies using StringTie
-- gffcompare classification of assembled transcripts against Ensembl release 111
+- gffcompare classification against Ensembl release 111
 - ORF predictions for selected novel transcript classes using TransDecoder
-- Deduplicated combined databases containing the reviewed proteome, variant proteins, fusion proteins, and splice-derived proteins
-
-## Principal Outputs
-
-- Per-sample PASS VCF files
-- VEP-annotated VCF files containing all overlapping transcript consequences
-- Expanded per-sample variant protein FASTA files
-- Arriba accepted and discarded fusion tables
-- Fusion-junction protein FASTA files
-- StringTie transcript assemblies
-- gffcompare annotated and novelty-filtered GTF files
-- Novel-splicing-derived protein FASTA files
-- TK13-minus-TK12 and TK14-minus-TK12 progression VCF files
-- Progression-specific protein FASTA files
-- Combined exploratory proteogenomics FASTA files
-- Raw and trimmed FastQC reports
-- Alignment and variant summary statistics
-- A consolidated MultiQC report
+- Progression VCF and protein FASTA outputs after baseline subtraction
+- Deduplicated combined FASTA databases containing reviewed, variant, fusion, and splice-derived proteins
 
 ## Workflow
 
@@ -94,7 +78,7 @@ samples.csv
                 +--> coordinate-sorted and indexed BAM
                        +--> samtools flagstat
                        +--> StringTie transcript assembly
-                       |      +--> gffcompare reference classification
+                       |      +--> gffcompare classification
                        |      +--> retain class codes j and u
                        |      +--> transcript sequence extraction
                        |      +--> TransDecoder ORF prediction
@@ -106,48 +90,143 @@ samples.csv
                        +--> GenotypeGVCFs
                        +--> hard filtering and PASS selection
                        +--> bcftools stats
-                       +--> VEP with all overlapping transcript consequences
-                       +--> pypgatk expanded variant protein FASTA
-                       +--> baseline/progression pairing
-                              +--> bcftools baseline subtraction
+                       +--> VEP all-transcript annotation
+                       +--> pypgatk variant protein FASTA
+                       +--> baseline subtraction
+                              +--> progression-specific VCF
                               +--> progression-specific protein FASTA
 
 reviewed proteome + variant FASTA + fusion FASTA + splice FASTA
-  +--> exact protein-sequence deduplication
+  +--> exact sequence deduplication
   +--> combined exploratory proteogenomics FASTA
 
 all QC logs and reports
   +--> MultiQC
 ```
 
+## Storage Model
+
+Project files, downloaded assets, and published outputs remain under the repository directory:
+
+```text
+$PWD/
+├── main.nf
+├── scratch.slurm
+├── samples.csv
+├── singularity_cache/
+├── reference_downloads/
+├── sra_cache/
+└── results/
+```
+
+Large execution data is placed on the Saga work filesystem:
+
+```text
+/cluster/work/users/ash022/
+├── work/    Nextflow task directories, intermediates, and resume cache
+└── tmp/     launcher, Java, Singularity, and Apptainer temporary files
+```
+
+The launcher passes:
+
+```text
+-work-dir /cluster/work/users/ash022/work
+```
+
+Nextflow creates a unique work directory for each task. Inputs are staged there, commands run there, outputs are cached there, and compatible completed tasks are reused with `-resume`.
+
+`fasterq-dump` uses a `fasterq_tmp` subdirectory inside its task directory and writes FASTQ output to that same task directory. No external fasterq-specific path or custom Singularity bind is required.
+
+Containers, reference archives, and SRA archives remain under `$PWD`. Compute-node analysis does not redownload them.
+
 ## Important Implementation Details
 
-- `fasterq-dump --split-files` converts each paired-end SRA archive into `_1.fastq` and `_2.fastq` files.
-- `fasterq-dump` uses an explicit `fasterq_tmp` directory inside the Nextflow task directory and writes output to the task directory.
-- Trim Galore detects common adapter types, performs adapter trimming, trims low-quality ends at Phred 20, and removes pairs shorter than 36 bases after trimming.
+- `fasterq-dump --split-files` creates paired `_1.fastq` and `_2.fastq` files.
+- Trim Galore trims adapters and Phred-20 low-quality ends, then removes pairs shorter than 36 bases.
 - FastQC runs before and after trimming.
 - STAR produces an Arriba-compatible unsorted BAM using `WithinBAM HardClip`.
 - Arriba consumes the original STAR BAM directly.
 - `SORT_INDEX_BAM` creates the coordinate-sorted and indexed BAM required by GATK and StringTie.
-- `REF_INDEX`, `SORT_INDEX_BAM`, and `SAMTOOLS_FLAGSTAT` use the dedicated SAMtools 1.21 container.
+- `REF_INDEX`, `SORT_INDEX_BAM`, and `SAMTOOLS_FLAGSTAT` use SAMtools 1.21.
 - `REF_INDEX` creates `genome.fa.fai` and `genome.dict` with `samtools faidx` and `samtools dict`.
 - `SplitNCigarReads` handles RNA-seq splice-junction alignments before variant calling.
-- VEP does not restrict output to one selected transcript.
-- pypgatk 0.0.24 uses `--vcf`, `--input_fasta`, `--gene_annotations_gtf`, and underscore-style option names.
-- The pypgatk nucleotide input is the Ensembl release 111 cDNA transcript FASTA, not the UniProt protein FASTA.
-- The reviewed UniProt proteome remains the canonical base of the final combined search database.
-- `bcftools isec -C -w 1` retains progression-sample variants absent from the matched baseline callset.
-- gffcompare 0.12.10 annotates StringTie transcripts against the matching Ensembl GTF.
-- The default novelty filter retains gffcompare class codes `j` and `u`.
-- TransDecoder 6.0.0 utilities are invoked with their verified absolute paths under `/usr/local/opt/transdecoder/util/`.
-- `STAR_INDEX` uses the Saga `normal` partition with 8 CPUs and 64 GB memory.
-- `STAR_ALIGN` uses the Saga `bigmem` partition with 32 CPUs and 256 GB memory.
-- The larger `STAR_ALIGN` allocation follows an earlier exit-137 memory failure with 32 GB.
-- Nextflow uses fail-fast behavior by default. An unhandled process failure stops the workflow and terminates running tasks, including tasks on independent branches. Compatible completed tasks are recovered by the next `-resume` run.
+- VEP retains all overlapping transcript consequences.
+- pypgatk 0.0.24 uses underscore-style options including `--input_fasta`, `--gene_annotations_gtf`, and `--output_proteindb`.
+- The pypgatk nucleotide input is Ensembl release 111 cDNA, not the UniProt protein FASTA.
+- The reviewed UniProt proteome is the canonical base of the final combined database.
+- `bcftools isec -C -w 1` retains progression variants absent from the matched baseline callset.
+- gffcompare retains class codes `j` and `u` by default.
+- TransDecoder utilities are invoked using verified absolute paths under `/usr/local/opt/transdecoder/util/`.
+- Large unpacked references and the STAR index remain in the Nextflow cache and are not duplicated into `results/`.
+- Nextflow uses fail-fast behavior. An unhandled task failure stops the workflow and terminates running tasks. Completed compatible tasks are recovered by `-resume`.
+
+## Full-Node Resource Strategy
+
+Normal Saga nodes provide 20 CPUs and 80 GB memory. Compute-intensive normal-partition processes request up to 20 CPUs and 64 GB, leaving memory for the operating system and container overhead.
+
+`MARK_DUPLICATES` previously failed with `OUT_OF_MEMORY` at 16 GB. It now requests 20 CPUs and 64 GB, uses a bounded 56 GB Java heap, and sets `--MAX_RECORDS_IN_RAM 1000000`.
+
+`STAR_ALIGN` remains on `bigmem` with 32 CPUs and 256 GB after an earlier exit-137 failure at 32 GB.
+
+```text
+Process                 Partition   CPUs   Memory   Time    Disk
+DOWNLOAD_REFERENCES     normal        8     32 GB   12h    100 GB
+SRA_TO_FASTQ            normal       16     32 GB   24h    150 GB
+CAT_FASTQ               normal        2      8 GB    4h    200 GB
+FASTQC_RAW              normal        8     16 GB    8h    100 GB
+TRIM_GALORE             normal        8     16 GB   12h    150 GB
+FASTQC_TRIMMED          normal        8     16 GB    8h    100 GB
+STAR_INDEX              normal       20     64 GB   12h    320 GB
+STAR_ALIGN              bigmem       32    256 GB   24h    320 GB
+SORT_INDEX_BAM          normal       20     64 GB   24h    200 GB
+SAMTOOLS_FLAGSTAT       normal        4     16 GB    4h     20 GB
+REF_INDEX               normal        4     16 GB    4h     30 GB
+MARK_DUPLICATES         normal       20     64 GB   24h    200 GB
+SPLIT_N_CIGAR           normal       20     64 GB   24h    200 GB
+HAPLOTYPE_CALLER        normal       20     64 GB   48h    120 GB
+GENOTYPE_FILTER         normal        8     32 GB   12h     40 GB
+BCFTOOLS_STATS          normal        2      8 GB    4h     20 GB
+VEP_ANNOTATE            normal       20     64 GB   24h     60 GB
+PYPGATK_FASTA           normal        8     32 GB   12h     40 GB
+ARRIBA                   normal        8     32 GB   12h     60 GB
+FUSION_FASTA            normal        4     16 GB    8h     20 GB
+STRINGTIE_ASSEMBLY      normal       20     64 GB   24h     80 GB
+GFFCOMPARE_NOVEL        normal        4     16 GB    8h     30 GB
+SPLICE_PROTEIN_FASTA    normal       20     64 GB   24h     60 GB
+COMBINE_PROTEIN_FASTA   normal        2      8 GB    4h     30 GB
+PROGRESSION_SUBTRACT    normal        2      8 GB    4h     20 GB
+PROGRESSION_FASTA       normal        8     32 GB   12h     40 GB
+MULTIQC                 normal        8     32 GB    4h     40 GB
+```
+
+The Nextflow launcher requests 4 CPUs and 16 GB on `normal`.
+
+## Launcher Configuration
+
+The launcher preserves Saga `StdEnv` and loads Java with:
+
+```bash
+module purge
+module load Java/21
+```
+
+Do not use `module --force purge`, because it removes `StdEnv` and can make `Java/21` unavailable on compute nodes.
+
+The SLURM account is passed to Nextflow as one argument:
+
+```bash
+"-process.clusterOptions=--account=nn9036k"
+```
+
+Do not use the two-argument form below, because Nextflow can parse `clusterOptions` as Boolean `true`:
+
+```bash
+-process.clusterOptions "--account=nn9036k"
+```
+
+The streamlined launcher enables `-resume` and creates only a task trace. HTML execution reports and timelines are not enabled by default.
 
 ## Exploratory Database Filters
-
-The splice-derived database uses these defaults:
 
 ```text
 Minimum StringTie coverage:         2.5
@@ -161,90 +240,45 @@ Class code `j` represents a potentially novel splice-junction combination. Class
 
 Exact duplicate protein sequences are removed from splice-derived FASTA files and from the final combined database.
 
-Fusion FASTA generation uses 50 amino acids around each fusion breakpoint where possible and retains the full downstream sequence for frameshift fusions. If Arriba reports no accepted candidates, an empty fusion FASTA is created so the remaining workflow can continue.
+Fusion FASTA generation uses 50 amino acids around each fusion breakpoint where possible and retains the full downstream sequence for frameshift fusions. If Arriba reports no accepted candidates, an empty fusion FASTA is created so the workflow can continue.
 
 ## QC and Reporting
 
-MultiQC aggregates:
-
-- Raw FastQC reports
-- Trimmed FastQC reports
-- Trim Galore and Cutadapt reports
-- STAR `Log.final.out`
-- `samtools flagstat`
-- Picard/GATK MarkDuplicates metrics
-- `bcftools stats`
-
-Final reports:
+MultiQC aggregates raw and trimmed FastQC reports, Trim Galore and Cutadapt reports, STAR `Log.final.out`, `samtools flagstat`, MarkDuplicates metrics, and `bcftools stats`.
 
 ```text
 results/multiqc/multiqc_report.html
 results/multiqc/multiqc_data/
+results/pipeline_trace-<launcher-job-id>.tsv
 ```
 
-## Validation Utilities
+## Validation
 
-The repository includes two login-node validation scripts:
-
-```text
-probe_pipeline_cli.sh          Captures installed CLI help, versions, and relevant option interfaces
-validate_pipeline_commands.sh Validates containers, references, CLI contracts, and main.nf implementation details
-```
-
-Run them before submitting the workflow:
+Run before submission:
 
 ```bash
-dos2unix probe_pipeline_cli.sh validate_pipeline_commands.sh
-chmod +x probe_pipeline_cli.sh validate_pipeline_commands.sh
+dos2unix probe_pipeline_cli.sh validate_pipeline_commands.sh scratch.slurm
+chmod +x probe_pipeline_cli.sh validate_pipeline_commands.sh scratch.slurm
 bash -n probe_pipeline_cli.sh
 bash -n validate_pipeline_commands.sh
+bash -n scratch.slurm
 bash probe_pipeline_cli.sh
 bash validate_pipeline_commands.sh
+sbatch --test-only scratch.slurm
 ```
 
-A successful validation ends with:
+The synchronized configuration currently passes 39 checks:
 
 ```text
+PASS: 39
 WARN: 0
 FAIL: 0
 RESULT: PASSED
 ```
 
-The latest validated configuration passed 56 checks with no warnings or failures.
-
-## Removed or Replaced Components
-
-The following earlier components are no longer part of the workflow:
-
-- Mutect2, orientation modelling, and FilterMutectCalls
-- DELLY structural-variant calling and group-level DELLY merging
-- MAPQ 255-to-60 rewriting
-- Sensitive/resistant group-level VCF merging
-
-They were replaced by the current HaplotypeCaller, Arriba, progression, expanded FASTA, novel-splicing, and QC branches.
-
-## Repository Files
-
-```text
-main.nf                       Nextflow DSL2 workflow
-download_assets.sh            Login-node downloader and validator for references and containers
-download_sra.sh               Login-node downloader and validator for SRA archives
-probe_pipeline_cli.sh         Container CLI and argument probe
-validate_pipeline_commands.sh End-to-end static and environment validator
-scratch.slurm                 Saga launcher for Nextflow
-samples.csv                   Sample metadata
-singularity_cache/            Pre-downloaded Singularity images
-reference_downloads/          Pre-downloaded reference archives
-sra_cache/                    Pre-downloaded SRA archives
-work/                         Nextflow work directory
-results/                      Published pipeline outputs
-```
-
-`download_assets.sh` and `download_sra.sh` perform asset validation. `scratch.slurm` intentionally does not repeat downloaded-file validation and launches Nextflow using prepared local paths.
+The validator rejects force-purging modules, malformed `clusterOptions`, obsolete storage paths, custom container binds, and launcher report or timeline options.
 
 ## Requirements
-
-The tested Saga environment uses:
 
 - Nextflow 26.04.6
 - Java 21
@@ -252,30 +286,9 @@ The tested Saga environment uses:
 - SLURM account `nn9036k`
 - Internet access on the login node for initial downloads
 - No internet dependency for compute-node analysis
-
-The workflow uses 15 pre-downloaded container images:
-
-- SRA Tools 3.2.1
-- Trim Galore 0.6.10
-- FastQC 0.12.1
-- STAR 2.7.11b
-- GATK 4.6.1.0
-- SAMtools 1.21
-- Ensembl VEP 111
-- pypgatk 0.0.24
-- Arriba 2.4.0
-- bcftools 1.21
-- MultiQC 1.35
-- StringTie 3.0.3
-- TransDecoder 6.0.0
-- pVACtools 7.1.1
-- gffcompare 0.12.10
-
-`download_assets.sh` uses stable local image names for StringTie, TransDecoder, and gffcompare. It retries Quay API resolution and uses pinned fallback tags when necessary.
+- Fifteen pre-downloaded container images under `singularity_cache/`
 
 ## Input Samplesheet
-
-The required file is `samples.csv`:
 
 ```csv
 sample,srr,TK,Group,baseline
@@ -284,180 +297,97 @@ TK13,SRR31089073,patient1,sensitive,false
 TK14,SRR31089072,patient1,sensitive,false
 ```
 
-Column definitions:
-
-- `sample`: biological sample identifier
-- `srr`: SRA run accession
-- `TK`: longitudinal key used to pair baseline and progression samples
-- `Group`: biological group label
-- `baseline`: `true` for the earliest sample, `false` for a later sample, or blank for a sample without a matched baseline
-
 Exactly one baseline should be marked `true` for each longitudinal key used for progression subtraction.
 
-## Setup on Saga
+## Setup on HPC/saga
 
-Run all commands from the repository directory.
+Run from the repository directory.
 
-### 1. Download and Validate Containers and References
+### 1. Download assets
 
 ```bash
-dos2unix download_assets.sh
-chmod +x download_assets.sh
-bash -n download_assets.sh
 bash download_assets.sh
-```
-
-The downloader creates or updates:
-
-```text
-singularity_cache/
-reference_downloads/
-```
-
-Reference assets include:
-
-- Ensembl GRCh38 primary assembly, release 111
-- Ensembl release 111 GTF
-- Ensembl release 111 cDNA transcript FASTA
-- Ensembl VEP 111 GRCh38 cache
-- Reviewed UniProt human proteome with isoforms
-- Arriba 2.4.0 resources
-
-Downloads are resumable where supported. The UniProt streaming endpoint is downloaded afresh to a temporary file when needed because it does not support byte-range resume.
-
-Expected final message:
-
-```text
-All 15 containers and all reference archives are valid.
-```
-
-### 2. Download and Validate SRA Archives
-
-```bash
-dos2unix download_sra.sh
-chmod +x download_sra.sh
-bash -n download_sra.sh
 bash download_sra.sh
 ```
 
-Expected files:
+Do not remove `singularity_cache/`, `reference_downloads/`, or `sra_cache/` when resetting an execution.
 
-```text
-sra_cache/SRR31089072/SRR31089072.sra
-sra_cache/SRR31089073/SRR31089073.sra
-sra_cache/SRR31089074/SRR31089074.sra
-```
-
-Check them with:
+### 2. Prepare storage
 
 ```bash
-find sra_cache -type f -name '*.sra' -printf '%p %s bytes\n'
+mkdir -p     /cluster/work/users/ash022/work     /cluster/work/users/ash022/tmp
+
+test -w /cluster/work/users/ash022/work
+test -w /cluster/work/users/ash022/tmp
 ```
 
-### 3. Probe and Validate the Pipeline
+For a completely fresh execution:
 
 ```bash
-bash probe_pipeline_cli.sh
+rm -rf /cluster/work/users/ash022/work/*
+rm -rf /cluster/work/users/ash022/tmp/*
+rm -rf .nextflow
+rm -f .nextflow.log
+```
+
+### 3. Validate and submit
+
+```bash
 bash validate_pipeline_commands.sh
-```
-
-Expected validator result:
-
-```text
-WARN: 0
-FAIL: 0
-RESULT: PASSED
-```
-
-### 4. Validate the SLURM Launcher
-
-```bash
-bash -n scratch.slurm
 sbatch --test-only scratch.slurm
-```
 
-### 5. Submit or Resume the Pipeline
-
-```bash
 JOBID=$(sbatch --parsable scratch.slurm)
 echo "$JOBID"
+
+while [[ ! -f "resultsTKvep-${JOBID}.log" ]]; do
+    sleep 2
+done
+
 tail -f "resultsTKvep-${JOBID}.log"
 ```
 
-Monitor launcher and child jobs:
+Monitor jobs and storage:
 
 ```bash
-watch -n 5 "squeue -u \$USER -o '%.18i %.38j %.10P %.10T %.6C %.12m %.20R'"
+watch -n 60 '
+squeue -u "$USER"   -o "%.18i %.42j %.10P %.10T %.6C %.12m %.20R"
+
+echo
+
+du -sh /cluster/work/users/ash022/work 2>/dev/null
+du -sh /cluster/work/users/ash022/tmp 2>/dev/null
+'
 ```
 
-The launcher invokes Nextflow with `-resume`, so compatible completed tasks are reused after interruption or workflow correction.
+Monitor task resources:
 
-## Saga Resource Routing
-
-```text
-Process                 Partition   CPUs   Memory   Time    Disk
-STAR_INDEX              normal        8     64 GB   12h    320 GB
-STAR_ALIGN              bigmem       32    256 GB   24h    320 GB
-HAPLOTYPE_CALLER        normal       10     16 GB   48h    120 GB
-VEP_ANNOTATE            normal       10     16 GB   24h     60 GB
-SRA_TO_FASTQ            normal        8     16 GB   24h    150 GB
-SORT_INDEX_BAM          normal        8     16 GB   24h    200 GB
-STRINGTIE_ASSEMBLY      normal        8     16 GB   24h     80 GB
-GFFCOMPARE_NOVEL        normal        2      8 GB    8h     30 GB
-SPLICE_PROTEIN_FASTA    normal        8     16 GB   24h     60 GB
-FUSION_FASTA            normal        2      8 GB    8h     20 GB
-FASTQC_RAW              normal        4      8 GB    8h    100 GB
-FASTQC_TRIMMED          normal        4      8 GB    8h    100 GB
-MULTIQC                 normal        2      8 GB    4h     40 GB
+```bash
+watch -n 60 '
+for job in $(squeue -h -u "$USER" -o "%A"); do
+    sstat -j "${job}.batch"         --format=JobID,MaxRSS,AveRSS,AveCPU 2>/dev/null
+done
+'
 ```
 
-All processes except `STAR_ALIGN` use the `normal` partition. The Nextflow launcher uses 2 CPUs and 8 GB on `normal`.
-
-### Observed STAR Resource Usage
-
-`STAR_INDEX` was initially allocated 256 GB after an earlier 32 GB failure. A successful GRCh38 Ensembl release 111 index build used:
-
-```text
-CPUs allocated:       8
-Peak memory:          38.06 GB
-Wall-clock time:      1:09:06
-CPU efficiency:       67.84%
-```
-
-The current 64 GB request provides headroom over the observed peak. `STAR_ALIGN` remains conservatively allocated 256 GB until successful per-sample peak-memory measurements are available.
-
-## Output Structure
+## Principal Output Structure
 
 ```text
 results/
-├── references/
-│   └── star_index/
 ├── qc/
-│   ├── fastqc_raw/
-│   ├── fastqc_trimmed/
-│   ├── trim_galore/
-│   ├── flagstat/
-│   └── bcftools/
 ├── multiqc/
-│   ├── multiqc_report.html
-│   └── multiqc_data/
-├── bam/
-│   └── star/
+├── bam/star/
 ├── gvcf/
 ├── vcf_pass/
 ├── vep/
 ├── variant_fasta/
 ├── fusions/
 ├── fusion_fasta/
-├── splicing/
-│   ├── stringtie/
-│   └── gffcompare/
+├── splicing/stringtie/
+├── splicing/gffcompare/
 ├── splice_fasta/
 ├── combined_fasta/
 ├── progression_vcf/
 ├── progression_fasta/
-├── pipeline_report-*.html
-├── pipeline_timeline-*.html
 └── pipeline_trace-*.tsv
 ```
 
@@ -467,32 +397,29 @@ The principal combined database is:
 results/combined_fasta/<sample>.exploratory_proteogenomics.fasta
 ```
 
+Large unpacked references and the STAR index remain cached under `/cluster/work/users/ash022/work` and are not duplicated into `results/`.
+
 ## Interpretation and Limitations
 
 - RNA-seq detects variants and isoforms only in expressed and sufficiently covered regions.
-- RNA editing, mapping artefacts, allele-specific expression, transcript assembly errors, and incomplete ORFs can affect results.
+- RNA editing, mapping artefacts, allele-specific expression, assembly errors, and incomplete ORFs can affect results.
 - HaplotypeCaller outputs are not equivalent to validated tumor-only somatic calls.
 - TK12 subtraction can reflect biological acquisition or insufficient TK12 expression or coverage.
-- Retaining all transcript consequences, fusion proteins, and splice-derived ORFs substantially increases database size and the multiple-testing burden.
+- Retaining all transcript consequences, fusion proteins, and splice-derived ORFs increases database size and the multiple-testing burden.
 - Strict target-decoy FDR control is required.
-- Variant peptides should span the altered residue, fusion peptides should span the fusion junction, and splice-derived peptides should support a novel exon junction or ORF.
-- gffcompare class codes describe transcript relationships to the reference, not direct evidence of protein expression.
-- Fusion and splice-derived sequences remain exploratory and require orthogonal review of RNA read support.
+- Variant peptides should span the altered residue, fusion peptides the fusion junction, and splice-derived peptides a novel exon junction or ORF.
+- Fusion and splice-derived sequences remain exploratory and require orthogonal review of RNA support.
 
 ## Downstream Proteomics
 
-Recommended downstream steps:
-
 1. Search each sample against its corresponding combined exploratory FASTA.
-2. Include a contaminant database and target-decoy sequences.
+2. Include contaminants and target-decoy sequences.
 3. Control peptide-spectrum match, peptide, and protein FDR.
 4. Require variant, fusion, or splice-supporting peptides to cover the relevant altered residue or junction.
-5. Compare peptide detections with RNA read support, depth, allele fraction, and transcript abundance.
-6. Treat canonical, variant, fusion, and splice-derived identifications as separate evidence classes during interpretation.
+5. Compare peptide detections with RNA depth, allele fraction, and transcript abundance.
+6. Treat canonical, variant, fusion, and splice-derived identifications as separate evidence classes.
 
 ## Citation
-
-If you use this repository, its data, or derived results, cite:
 
 ```text
 Cancers. 2024;16(23):3963.
@@ -505,4 +432,4 @@ See [LICENSE](LICENSE) for details.
 
 ## Contact
 
-For questions about the workflow or data, open an issue or contact `animesh@fuzzylife.org`.
+For questions, open an issue or contact `animesh@fuzzylife.org`.
