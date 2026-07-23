@@ -1,0 +1,8 @@
+patient,sample,fastq_1,fastq_2,lane
+TK18,SRR31089070,/mnt/z/Download/TK/fastq/SRR31089070_1.fastq.gz,/mnt/z/Download/TK/fastq/SRR31089070_2.fastq.gz,laneNA
+TK16,SRR31089071,/mnt/z/Download/TK/fastq/SRR31089071_1.fastq.gz,/mnt/z/Download/TK/fastq/SRR31089071_2.fastq.gz,laneNA
+TK14,SRR31089072,/mnt/z/Download/TK/fastq/SRR31089072_1.fastq.gz,/mnt/z/Download/TK/fastq/SRR31089072_2.fastq.gz,laneNA
+TK13,SRR31089073,/mnt/z/Download/TK/fastq/SRR31089073_1.fastq.gz,/mnt/z/Download/TK/fastq/SRR31089073_2.fastq.gz,laneNA
+TK12,SRR31089074,/mnt/z/Download/TK/fastq/SRR31089074_1.fastq.gz,/mnt/z/Download/TK/fastq/SRR31089074_2.fastq.gz,laneNA
+TK10,SRR31089075,/mnt/z/Download/TK/fastq/SRR31089075_1.fastq.gz,/mnt/z/Download/TK/fastq/SRR31089075_2.fastq.gz,laneNA
+TK9,SRR31089076,/mnt/z/Download/TK/fastq/SRR31089076_1.fastq.gz,/mnt/z/Download/TK/fastq/SRR31089076_2.fastq.gz,laneNA
