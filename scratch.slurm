@@ -23,18 +23,16 @@ module purge
 module load Java/21
 
 export NXF_HOME="${PROJECT_DIR}/.nextflow_home"
-export NXF_SINGULARITY_CACHEDIR="${PROJECT_DIR}/singularity_cache"
+export NXF_APPTAINER_CACHEDIR="${PROJECT_DIR}/singularity_cache"
 export NXF_OPTS="-Xms2g -Xmx12g"
 export TMPDIR="${RUN_TMP}"
 export TMP="${RUN_TMP}"
 export TEMP="${RUN_TMP}"
-export SINGULARITY_TMPDIR="${RUN_TMP}/singularity"
 export APPTAINER_TMPDIR="${RUN_TMP}/apptainer"
 
 mkdir -p \
     "${WORK_DIR}" \
     "${TMPDIR}" \
-    "${SINGULARITY_TMPDIR}" \
     "${APPTAINER_TMPDIR}" \
     "${NXF_HOME}" \
     "${PROJECT_DIR}/results"
@@ -47,6 +45,7 @@ test -d "${PROJECT_DIR}/reference_downloads"
 test -d "${PROJECT_DIR}/sra_cache"
 test -w "${WORK_DIR}"
 test -w "${TMPDIR}"
+command -v apptainer >/dev/null
 
 printf 'Node: %s\n' "$(hostname)"
 printf 'Project: %s\n' "${PROJECT_DIR}"
@@ -54,12 +53,12 @@ printf 'Work: %s\n' "${WORK_DIR}"
 printf 'Temporary: %s\n' "${TMPDIR}"
 df -h "${PROJECT_DIR}" "${WORK_DIR}" "${TMPDIR}"
 
-singularity --version
+apptainer --version
 "${NEXTFLOW}" -version
 
 "${NEXTFLOW}" run "${PROJECT_DIR}/main.nf" \
     -ansi-log false \
-    -with-singularity \
+    -with-apptainer \
     -process.executor slurm \
     "-process.clusterOptions=--account=nn9036k" \
     -work-dir "${WORK_DIR}" \

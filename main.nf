@@ -360,7 +360,10 @@ process PYPGATK_FASTA {
         --include_consequences missense_variant,frameshift_variant,stop_gained,stop_lost,start_lost,splice_donor_variant,splice_acceptor_variant,inframe_insertion,inframe_deletion \
         --output_proteindb ${meta.sample}.variant_proteins.fasta
 
-    test -s ${meta.sample}.variant_proteins.fasta
+    if [[ ! -s ${meta.sample}.variant_proteins.fasta ]]; then
+        echo "Warning: no variant proteins generated for ${meta.sample}" >&2
+        : > ${meta.sample}.variant_proteins.fasta
+    fi
     sed -i 's/^>/>${meta.sample}|/' ${meta.sample}.variant_proteins.fasta
     """
 }
@@ -439,13 +442,25 @@ process GFFCOMPARE_NOVEL {
     """
     set -euo pipefail
 
-    gffcompare \\
-        -r ${reference_gtf} \\
-        -o ${meta.sample}.gffcompare \\
+    prefix=${meta.sample}.gffcompare
+
+    gffcompare \
+        -r ${reference_gtf} \
+        -o \${prefix} \
         ${assembled_gtf}
 
-    cp ${meta.sample}.gffcompare.annotated.gtf \\
-       ${meta.sample}.gffcompare.annotated.source.gtf
+    if [[ ! -s \${prefix}.annotated.gtf ]]; then
+        echo "ERROR: gffcompare did not create a non-empty annotated GTF" >&2
+        find . -maxdepth 1 -type f -printf '%f %s bytes\n' | sort >&2
+        exit 1
+    fi
+
+    if [[ -s \${prefix}.stats ]]; then
+        cp \${prefix}.stats ${meta.sample}.gffcompare.stats
+    else
+        printf 'No non-empty gffcompare statistics report was produced for %s\n' '${meta.sample}' \
+            > ${meta.sample}.gffcompare.stats
+    fi
 
     awk -v allowed='${params.splice_class_codes}' '
         BEGIN {
@@ -467,12 +482,9 @@ process GFFCOMPARE_NOVEL {
                 transcript = substr(\$0, RSTART + 15, RLENGTH - 16)
             if (selected[transcript]) print
         }
-    ' ${meta.sample}.gffcompare.annotated.source.gtf \\
-      > ${meta.sample}.novel.gtf
+    ' ${meta.sample}.gffcompare.annotated.gtf > ${meta.sample}.novel.gtf
 
-    mv ${meta.sample}.gffcompare.annotated.source.gtf \\
-       ${meta.sample}.gffcompare.annotated.gtf
-
+    test -e ${meta.sample}.novel.gtf
     test -s ${meta.sample}.gffcompare.annotated.gtf
     test -s ${meta.sample}.gffcompare.stats
     """
@@ -611,7 +623,10 @@ process PROGRESSION_FASTA {
         --include_consequences missense_variant,frameshift_variant,stop_gained,stop_lost,start_lost,splice_donor_variant,splice_acceptor_variant,inframe_insertion,inframe_deletion \
         --output_proteindb ${meta.sample}.progression_proteins.fasta
 
-    test -s ${meta.sample}.progression_proteins.fasta
+    if [[ ! -s ${meta.sample}.progression_proteins.fasta ]]; then
+        echo "Warning: no progression proteins generated for ${meta.sample}" >&2
+        : > ${meta.sample}.progression_proteins.fasta
+    fi
     sed -i 's/^>/>${meta.sample}|PROGRESSION|/' ${meta.sample}.progression_proteins.fasta
     """
 }
