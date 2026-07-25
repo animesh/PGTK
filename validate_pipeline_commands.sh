@@ -134,6 +134,7 @@ require_file "$SLURM_FILE"
 require_file "$SAMPLES"
 command -v apptainer >/dev/null 2>&1 && pass "Apptainer found: $(command -v apptainer)" || fail "Apptainer missing"
 command -v java >/dev/null 2>&1 && pass "Java found: $(command -v java)" || fail "Java missing"
+command -v python >/dev/null 2>&1 && pass "Python found: $(command -v python)" || fail "Python missing"
 [[ -x "$NEXTFLOW" ]] && pass "Nextflow executable exists" || fail "Nextflow executable missing: $NEXTFLOW"
 require_dir_writable "$WORK_DIR"
 require_dir_writable "$TMP_ROOT"
@@ -229,7 +230,10 @@ check_executable "STAR" "$CONTAINER_DIR/${containers[3]}" STAR
 check_executable "GATK" "$CONTAINER_DIR/${containers[4]}" gatk
 check_executable "SAMtools" "$CONTAINER_DIR/${containers[5]}" samtools
 check_executable "VEP" "$CONTAINER_DIR/${containers[6]}" vep
+check_executable "bgzip in VEP" "$CONTAINER_DIR/${containers[6]}" bgzip
+check_executable "tabix in VEP" "$CONTAINER_DIR/${containers[6]}" tabix
 check_executable "pypgatk" "$CONTAINER_DIR/${containers[7]}" pypgatk
+check_executable "gzip in pypgatk" "$CONTAINER_DIR/${containers[7]}" gzip
 check_executable "Arriba" "$CONTAINER_DIR/${containers[8]}" arriba
 check_executable "bcftools" "$CONTAINER_DIR/${containers[9]}" bcftools
 check_executable "MultiQC" "$CONTAINER_DIR/${containers[10]}" multiqc
@@ -263,7 +267,37 @@ grep -Fq 'known_fusions_hg38_GRCh38' "$ARRIBA_ARCHIVE_LIST" && pass "Arriba know
 grep -Fq 'protein_domains_hg38_GRCh38' "$ARRIBA_ARCHIVE_LIST" && pass "Arriba protein-domains asset" || fail "Arriba protein-domains asset"
 
 section "Workflow syntax and corruption checks"
-if grep -nE '&gt;|&lt;|&amp;|-&gt;' "$MAIN_NF"; then fail "main.nf contains HTML entities"; else pass "No HTML entities"; fi
+HTML_ENTITY_REPORT="$TEST_ROOT/html_entities.txt"
+if python - "$MAIN_NF" > "$HTML_ENTITY_REPORT" <<'PY_HTML'
+from pathlib import Path
+import sys
+
+text = Path(sys.argv[1]).read_text()
+amp = chr(38)
+entities = (
+    amp + 'gt;',
+    amp + 'lt;',
+    amp + 'amp;',
+    '-' + amp + 'gt;',
+)
+
+found = []
+for number, line in enumerate(text.splitlines(), 1):
+    hits = [entity for entity in entities if entity in line]
+    if hits:
+        found.append((number, hits, line))
+
+if found:
+    for number, hits, line in found:
+        print(f"{number}: {','.join(hits)}: {line}")
+    raise SystemExit(1)
+PY_HTML
+then
+    pass "No literal HTML entities"
+else
+    cat "$HTML_ENTITY_REPORT"
+    fail "main.nf contains literal HTML entities"
+fi
 if grep -n $'\r' "$MAIN_NF" "$SLURM_FILE" >/dev/null; then fail "CRLF characters detected"; else pass "Unix line endings"; fi
 processes=(DOWNLOAD_REFERENCES SRA_TO_FASTQ CAT_FASTQ FASTQC_RAW TRIM_GALORE FASTQC_TRIMMED STAR_INDEX STAR_ALIGN SORT_INDEX_BAM SAMTOOLS_FLAGSTAT REF_INDEX MARK_DUPLICATES SPLIT_N_CIGAR HAPLOTYPE_CALLER GENOTYPE_FILTER BCFTOOLS_STATS VEP_ANNOTATE PYPGATK_FASTA ARRIBA FUSION_FASTA STRINGTIE_ASSEMBLY GFFCOMPARE_NOVEL SPLICE_PROTEIN_FASTA COMBINE_PROTEIN_FASTA PROGRESSION_SUBTRACT PROGRESSION_FASTA MULTIQC)
 [[ $(grep -c '^process ' "$MAIN_NF") -eq ${#processes[@]} ]] && pass "Expected ${#processes[@]} process declarations" || fail "Unexpected process count: $(grep -c '^process ' "$MAIN_NF")"
@@ -284,8 +318,36 @@ require_terms "TransDecoder absolute paths" "$MAIN_NF" "/usr/local/opt/transdeco
 require_terms "Reference routing" "$MAIN_NF" "PYPGATK_FASTA(annotated,refs.gtf,refs.cdna)" "PROGRESSION_FASTA(prog,refs.gtf,refs.cdna)" "COMBINE_PROTEIN_FASTA(combined_inputs,refs.proteome)"
 require_terms "Novel class-code configuration" "$MAIN_NF" "params.splice_class_codes = 'j,u'" "-v allowed='\${params.splice_class_codes}'"
 require_terms "MultiQC aggregation" "$MAIN_NF" "raw_qc.qc" "trimmed_qc.qc" "trim_result.reports" "star_result.logs" "md_result.metrics" "variant_stats" "MULTIQC(qc_files)"
+check_process_terms MULTIQC "path 'multiqc_report.html'" "path 'multiqc_report_data'" "--filename multiqc_report.html" "--data-dir"
+reject_terms "Obsolete MultiQC output absent" "$MAIN_NF" "path 'multiqc_data'"
 reject_terms "No network downloads in main.nf" "$MAIN_NF" "curl " "wget " "prefetch "
 reject_terms "No obsolete workflow scratch configuration" "$MAIN_NF" "params.shared_tmp_root" "singularity.runOptions"
+
+section "pypgatk VCF input contracts"
+check_process_terms PYPGATK_FASTA \
+    'gzip -t ${vcf}' \
+    'gzip -dc ${vcf} > ${meta.sample}.pypgatk.vcf' \
+    'test -s ${meta.sample}.pypgatk.vcf' \
+    "grep -q '^##fileformat=VCF' \${meta.sample}.pypgatk.vcf" \
+    "if ! grep -qv '^#' \${meta.sample}.pypgatk.vcf; then" \
+    ': > ${meta.sample}.variant_proteins.fasta' \
+    '--vcf ${meta.sample}.pypgatk.vcf'
+
+check_process_terms PROGRESSION_FASTA \
+    'gzip -t ${vcf}' \
+    'gzip -dc ${vcf} > ${meta.sample}.progression.pypgatk.vcf' \
+    'test -s ${meta.sample}.progression.pypgatk.vcf' \
+    "grep -q '^##fileformat=VCF' \${meta.sample}.progression.pypgatk.vcf" \
+    "if ! grep -qv '^#' \${meta.sample}.progression.pypgatk.vcf; then" \
+    ': > ${meta.sample}.progression_proteins.fasta' \
+    '--vcf ${meta.sample}.progression.pypgatk.vcf'
+
+PYPGATK_BLOCK="$TEST_ROOT/PYPGATK_FASTA.disk.block"
+PROGRESSION_BLOCK="$TEST_ROOT/PROGRESSION_FASTA.disk.block"
+process_block PYPGATK_FASTA > "$PYPGATK_BLOCK"
+process_block PROGRESSION_FASTA > "$PROGRESSION_BLOCK"
+require_terms "PYPGATK_FASTA disk allocation" "$PYPGATK_BLOCK" "disk '80 GB'"
+require_terms "PROGRESSION_FASTA disk allocation" "$PROGRESSION_BLOCK" "disk '80 GB'"
 
 section "GATK task-local temporary storage"
 for process_name in MARK_DUPLICATES SPLIT_N_CIGAR HAPLOTYPE_CALLER GENOTYPE_FILTER; do

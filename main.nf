@@ -359,7 +359,7 @@ process VEP_ANNOTATE {
 }
 
 process PYPGATK_FASTA {
-    tag "${meta.sample}"; cpus 8; memory '32 GB'; time '12h'; disk '40 GB'; queue 'normal'
+    tag "${meta.sample}"; cpus 8; memory '32 GB'; time '12h'; disk '80 GB'; queue 'normal'
     container 'quay.io/biocontainers/pypgatk:0.0.24--pyhdfd78af_0'
     publishDir "${params.outdir}/variant_fasta", mode:'copy'
     input: tuple val(meta), path(vcf), path(tbi); path gtf; path cdna
@@ -368,8 +368,19 @@ process PYPGATK_FASTA {
     """
     set -euo pipefail
 
+    gzip -t ${vcf}
+    gzip -dc ${vcf} > ${meta.sample}.pypgatk.vcf
+    test -s ${meta.sample}.pypgatk.vcf
+    grep -q '^##fileformat=VCF' ${meta.sample}.pypgatk.vcf
+
+    if ! grep -qv '^#' ${meta.sample}.pypgatk.vcf; then
+        echo "Warning: no VCF records for ${meta.sample}" >&2
+        : > ${meta.sample}.variant_proteins.fasta
+        exit 0
+    fi
+
     pypgatk vcf-to-proteindb \
-        --vcf ${vcf} \
+        --vcf ${meta.sample}.pypgatk.vcf \
         --input_fasta ${cdna} \
         --gene_annotations_gtf ${gtf} \
         --annotation_field_name CSQ \
@@ -622,7 +633,7 @@ process PROGRESSION_SUBTRACT {
 }
 
 process PROGRESSION_FASTA {
-    tag "${meta.sample}"; cpus 8; memory '32 GB'; time '12h'; disk '40 GB'; queue 'normal'
+    tag "${meta.sample}"; cpus 8; memory '32 GB'; time '12h'; disk '80 GB'; queue 'normal'
     container 'quay.io/biocontainers/pypgatk:0.0.24--pyhdfd78af_0'
     publishDir "${params.outdir}/progression_fasta", mode:'copy'
     input: tuple val(meta), path(vcf), path(tbi); path gtf; path cdna
@@ -631,8 +642,19 @@ process PROGRESSION_FASTA {
     """
     set -euo pipefail
 
+    gzip -t ${vcf}
+    gzip -dc ${vcf} > ${meta.sample}.progression.pypgatk.vcf
+    test -s ${meta.sample}.progression.pypgatk.vcf
+    grep -q '^##fileformat=VCF' ${meta.sample}.progression.pypgatk.vcf
+
+    if ! grep -qv '^#' ${meta.sample}.progression.pypgatk.vcf; then
+        echo "Warning: no progression VCF records for ${meta.sample}" >&2
+        : > ${meta.sample}.progression_proteins.fasta
+        exit 0
+    fi
+
     pypgatk vcf-to-proteindb \
-        --vcf ${vcf} \
+        --vcf ${meta.sample}.progression.pypgatk.vcf \
         --input_fasta ${cdna} \
         --gene_annotations_gtf ${gtf} \
         --annotation_field_name CSQ \
@@ -656,7 +678,7 @@ process MULTIQC {
     input: path qc_files
     output:
     path 'multiqc_report.html'
-    path 'multiqc_data'
+    path 'multiqc_report_data'
     script:
     """
     multiqc . \
