@@ -122,7 +122,7 @@ Large execution data uses the Saga work filesystem:
 
 ```text
 /cluster/work/users/ash022/work    Nextflow tasks, intermediates, and resume cache
-/cluster/work/users/ash022/tmp     Java, launcher, and Apptainer temporary files
+/cluster/work/users/ash022/tmp     Launcher and Apptainer temporary files
 ```
 
 The launcher configures:
@@ -161,6 +161,34 @@ The launcher does not use legacy Singularity environment variables, message-leve
 - TransDecoder utilities use verified absolute paths under `/usr/local/opt/transdecoder/util/`.
 - Unpacked references and the STAR index remain in the Nextflow cache and are not duplicated into `results/`.
 - Nextflow uses fail-fast behavior. Compatible completed tasks are recovered with `-resume`.
+
+## GATK Temporary Storage and Index Handling
+
+GATK processes use task-local temporary storage inside their Nextflow work directories:
+
+```bash
+mkdir -p gatk_tmp
+trap 'rm -rf gatk_tmp' EXIT
+```
+
+Java is directed to the task-local directory with:
+
+```text
+-Djava.io.tmpdir=${PWD}/gatk_tmp
+```
+
+This configuration is used by `MARK_DUPLICATES`, `SPLIT_N_CIGAR`, `HAPLOTYPE_CALLER`, and all commands in `GENOTYPE_FILTER`. It prevents large GATK sorting spills from using restricted compute-node temporary storage.
+
+GATK may create the `SplitNCigarReads` index as `<sample>.split.bai`, while the declared Nextflow output is `<sample>.split.bam.bai`. The workflow normalizes the filename after a successful run:
+
+```bash
+if [[ -s ${meta.sample}.split.bai && ! -e ${meta.sample}.split.bam.bai ]]; then
+    mv ${meta.sample}.split.bai ${meta.sample}.split.bam.bai
+fi
+
+test -s ${meta.sample}.split.bam
+test -s ${meta.sample}.split.bam.bai
+```
 
 ## Robust Empty-Result Handling
 
@@ -249,7 +277,7 @@ Exactly one baseline must be marked `true` for each longitudinal key used for pr
 The synchronized configuration passed comprehensive validation on Saga on July 24, 2026:
 
 ```text
-PASS: 131
+PASS: 136
 WARN: 0
 FAIL: 0
 RESULT: PASSED
@@ -266,6 +294,8 @@ Validation covers:
 - Command, option, reference-routing, channel, and resource contracts
 - Absence of legacy, unsupported, network-download, and message-suppression options
 - Empty-result guards
+- GATK task-local temporary-storage contracts
+- `SplitNCigarReads` BAM-index normalization and output checks
 - A real gffcompare fixture executed inside its container
 - Apptainer-native launcher configuration
 - Launcher Bash syntax and `sbatch --test-only`
@@ -278,6 +308,12 @@ chmod +x scratch.slurm validate_pipeline_commands.sh
 bash -n scratch.slurm
 bash -n validate_pipeline_commands.sh
 bash validate_pipeline_commands.sh
+```
+
+The successful validation report is:
+
+```text
+pipeline_command_validation_20260724_202805.txt
 ```
 
 Check that `main.nf` contains no HTML entities:

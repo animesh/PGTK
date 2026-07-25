@@ -263,7 +263,9 @@ process MARK_DUPLICATES {
     script:
     """
     set -euo pipefail
-    gatk --java-options "-Xms4g -Xmx56g -XX:ParallelGCThreads=20" \
+    mkdir -p gatk_tmp
+    trap 'rm -rf gatk_tmp' EXIT
+    gatk --java-options "-Xms4g -Xmx56g -XX:ParallelGCThreads=20 -Djava.io.tmpdir=\${PWD}/gatk_tmp" \
         MarkDuplicates \
         -I ${bam} \
         -O ${meta.sample}.markdup.bam \
@@ -285,7 +287,16 @@ process SPLIT_N_CIGAR {
     output: tuple val(meta), path("${meta.sample}.split.bam"), path("${meta.sample}.split.bam.bai")
     script:
     """
-    gatk --java-options "-Xms4g -Xmx56g" SplitNCigarReads -R ${genome} -I ${bam} -O ${meta.sample}.split.bam --create-output-bam-index true
+    set -euo pipefail
+    mkdir -p gatk_tmp
+    trap 'rm -rf gatk_tmp' EXIT
+    df -h .
+    gatk --java-options "-Xms4g -Xmx56g -Djava.io.tmpdir=\${PWD}/gatk_tmp" SplitNCigarReads -R ${genome} -I ${bam} -O ${meta.sample}.split.bam --create-output-bam-index true
+    if [[ -s ${meta.sample}.split.bai && ! -e ${meta.sample}.split.bam.bai ]]; then
+        mv ${meta.sample}.split.bai ${meta.sample}.split.bam.bai
+    fi
+    test -s ${meta.sample}.split.bam
+    test -s ${meta.sample}.split.bam.bai
     """
 }
 
@@ -297,7 +308,10 @@ process HAPLOTYPE_CALLER {
     output: tuple val(meta), path("${meta.sample}.g.vcf.gz"), path("${meta.sample}.g.vcf.gz.tbi")
     script:
     """
-    gatk --java-options "-Xms4g -Xmx56g" HaplotypeCaller -R ${genome} -I ${bam} -O ${meta.sample}.g.vcf.gz -ERC GVCF --dont-use-soft-clipped-bases true --standard-min-confidence-threshold-for-calling 20 --native-pair-hmm-threads ${task.cpus}
+    set -euo pipefail
+    mkdir -p gatk_tmp
+    trap 'rm -rf gatk_tmp' EXIT
+    gatk --java-options "-Xms4g -Xmx56g -Djava.io.tmpdir=\${PWD}/gatk_tmp" HaplotypeCaller -R ${genome} -I ${bam} -O ${meta.sample}.g.vcf.gz -ERC GVCF --dont-use-soft-clipped-bases true --standard-min-confidence-threshold-for-calling 20 --native-pair-hmm-threads ${task.cpus}
     """
 }
 
@@ -309,9 +323,12 @@ process GENOTYPE_FILTER {
     output: tuple val(meta), path("${meta.sample}.pass.vcf.gz"), path("${meta.sample}.pass.vcf.gz.tbi")
     script:
     """
-    gatk --java-options "-Xms4g -Xmx28g" GenotypeGVCFs -R ${genome} -V ${gvcf} -O ${meta.sample}.raw.vcf.gz
-    gatk --java-options "-Xms4g -Xmx28g" VariantFiltration -R ${genome} -V ${meta.sample}.raw.vcf.gz --window 35 --cluster 3 --filter-expression 'QD < 2.0' --filter-name QD2 --filter-expression 'FS > 30.0' --filter-name FS30 --filter-expression 'MQ < 40.0' --filter-name MQ40 --filter-expression 'MQRankSum < -12.5' --filter-name MQRankSum-12.5 --filter-expression 'ReadPosRankSum < -8.0' --filter-name ReadPos-8 -O ${meta.sample}.filtered.vcf.gz
-    gatk --java-options "-Xms4g -Xmx28g" SelectVariants -R ${genome} -V ${meta.sample}.filtered.vcf.gz --exclude-filtered -O ${meta.sample}.pass.vcf.gz
+    set -euo pipefail
+    mkdir -p gatk_tmp
+    trap 'rm -rf gatk_tmp' EXIT
+    gatk --java-options "-Xms4g -Xmx28g -Djava.io.tmpdir=\${PWD}/gatk_tmp" GenotypeGVCFs -R ${genome} -V ${gvcf} -O ${meta.sample}.raw.vcf.gz
+    gatk --java-options "-Xms4g -Xmx28g -Djava.io.tmpdir=\${PWD}/gatk_tmp" VariantFiltration -R ${genome} -V ${meta.sample}.raw.vcf.gz --window 35 --cluster 3 --filter-expression 'QD < 2.0' --filter-name QD2 --filter-expression 'FS > 30.0' --filter-name FS30 --filter-expression 'MQ < 40.0' --filter-name MQ40 --filter-expression 'MQRankSum < -12.5' --filter-name MQRankSum-12.5 --filter-expression 'ReadPosRankSum < -8.0' --filter-name ReadPos-8 -O ${meta.sample}.filtered.vcf.gz
+    gatk --java-options "-Xms4g -Xmx28g -Djava.io.tmpdir=\${PWD}/gatk_tmp" SelectVariants -R ${genome} -V ${meta.sample}.filtered.vcf.gz --exclude-filtered -O ${meta.sample}.pass.vcf.gz
     """
 }
 

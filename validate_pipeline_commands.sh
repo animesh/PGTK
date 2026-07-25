@@ -31,31 +31,40 @@ require_file() {
 }
 
 require_dir_writable() {
-    local dir="$1"
+    local dir="$1" probe
     if [[ -d "$dir" && -w "$dir" ]]; then
-        local probe="$dir/.pgtk_write_test_$$"
-        if : > "$probe" 2>/dev/null; then rm -f "$probe"; pass "Directory writable: $dir"; else fail "Write test failed: $dir"; fi
+        probe="$dir/.pgtk_write_test_$$"
+        if : > "$probe" 2>/dev/null; then
+            rm -f "$probe"
+            pass "Directory writable: $dir"
+        else
+            fail "Write test failed: $dir"
+        fi
     else
         fail "Directory missing or not writable: $dir"
     fi
 }
 
 require_terms() {
-    local label="$1" file="$2"
+    local label="$1" file="$2" missing=0 term
     shift 2
-    local missing=0 term
     for term in "$@"; do
-        if ! grep -Fq -- "$term" "$file"; then fail "$label missing: $term"; missing=1; fi
+        if ! grep -Fq -- "$term" "$file"; then
+            fail "$label missing: $term"
+            missing=1
+        fi
     done
     (( missing == 0 )) && pass "$label"
 }
 
 reject_terms() {
-    local label="$1" file="$2"
+    local label="$1" file="$2" found=0 term
     shift 2
-    local found=0 term
     for term in "$@"; do
-        if grep -Fq -- "$term" "$file"; then fail "$label contains forbidden term: $term"; found=1; fi
+        if grep -Fq -- "$term" "$file"; then
+            fail "$label contains forbidden term: $term"
+            found=1
+        fi
     done
     (( found == 0 )) && pass "$label"
 }
@@ -68,21 +77,30 @@ container_exec() {
 
 check_container() {
     local image="$1"
-    if [[ ! -s "$image" ]]; then fail "Container missing: $image"; return; fi
-    if apptainer inspect "$image" >/dev/null 2>&1; then pass "Container valid: $(basename "$image")"; else fail "Container inspection failed: $image"; fi
+    if [[ ! -s "$image" ]]; then
+        fail "Container missing: $image"
+    elif apptainer inspect "$image" >/dev/null 2>&1; then
+        pass "Container valid: $(basename "$image")"
+    else
+        fail "Container inspection failed: $image"
+    fi
 }
 
 check_executable() {
     local label="$1" image="$2" executable="$3"
-    if container_exec "$image" sh -c "command -v '$executable' >/dev/null 2>&1 || test -x '$executable'"; then pass "$label executable"; else fail "$label executable missing: $executable"; fi
+    if container_exec "$image" sh -c "command -v '$executable' >/dev/null 2>&1 || test -x '$executable'"; then
+        pass "$label executable"
+    else
+        fail "$label executable missing: $executable"
+    fi
 }
 
 process_block() {
     local process_name="$1"
     awk -v name="$process_name" '
-        $0 ~ "^process[[:space:]]+" name "[[:space:]]*\\{" {inside=1}
-        inside {print}
-        inside && /^}/ {exit}
+        $0 ~ "^process[[:space:]]+" name "[[:space:]]*\\{" { inside=1 }
+        inside { print }
+        inside && /^}/ { exit }
     ' "$MAIN_NF"
 }
 
@@ -90,8 +108,23 @@ check_process_resources() {
     local name="$1" cpus="$2" memory="$3" queue="$4"
     local block="$TEST_ROOT/${name}.block"
     process_block "$name" > "$block"
-    if [[ ! -s "$block" ]]; then fail "Process missing: $name"; return; fi
+    if [[ ! -s "$block" ]]; then
+        fail "Process missing: $name"
+        return
+    fi
     require_terms "$name resources" "$block" "cpus $cpus" "memory '$memory'" "queue '$queue'"
+}
+
+check_process_terms() {
+    local name="$1"
+    shift
+    local block="$TEST_ROOT/${name}.contract.block"
+    process_block "$name" > "$block"
+    if [[ ! -s "$block" ]]; then
+        fail "Process missing: $name"
+        return
+    fi
+    require_terms "$name contract" "$block" "$@"
 }
 
 section "Environment and filesystem"
@@ -115,23 +148,29 @@ java -version 2>&1 | sed -n '1,3p'
 "$NEXTFLOW" -version || fail "Nextflow version command failed"
 
 section "Samplesheet contract"
-python - "$SAMPLES" "$SRA_DIR" <<'PY'
-import csv, pathlib, re, sys
+if python - "$SAMPLES" "$SRA_DIR" <<'PY'
+import csv
+import pathlib
+import re
+import sys
+
 samples = pathlib.Path(sys.argv[1])
 sra_root = pathlib.Path(sys.argv[2])
 with samples.open(newline='') as handle:
-    rows = list(csv.DictReader(handle))
+    reader = csv.DictReader(handle)
+    fieldnames = reader.fieldnames
+    rows = list(reader)
 required = ['sample', 'srr', 'TK', 'Group', 'baseline']
+if fieldnames != required:
+    raise SystemExit(f'header must be exactly {required}; found {fieldnames}')
 if not rows:
     raise SystemExit('samples.csv has no data rows')
-if list(rows[0].keys()) != required:
-    raise SystemExit(f'header must be exactly {required}; found {list(rows[0].keys())}')
 seen = set()
-baselines = {}
+keys = {}
 for number, row in enumerate(rows, 2):
-    for key in required[:4]:
-        if not (row[key] or '').strip():
-            raise SystemExit(f'row {number}: empty {key}')
+    for field in required[:4]:
+        if not (row[field] or '').strip():
+            raise SystemExit(f'row {number}: empty {field}')
     sample = row['sample'].strip()
     srr = row['srr'].strip()
     key = row['TK'].strip()
@@ -142,18 +181,25 @@ for number, row in enumerate(rows, 2):
     if not re.fullmatch(r'SRR\d+', srr):
         raise SystemExit(f'row {number}: invalid SRR accession {srr}')
     if baseline not in {'true', 'false', ''}:
-        raise SystemExit(f'row {number}: baseline must be true, false, or blank')
+        raise SystemExit(f'row {number}: invalid baseline value {baseline!r}')
+    data = keys.setdefault(key, {'baseline': 0, 'progression': 0})
     if baseline == 'true':
-        baselines[key] = baselines.get(key, 0) + 1
+        data['baseline'] += 1
+    elif baseline == 'false':
+        data['progression'] += 1
     archive = sra_root / srr / f'{srr}.sra'
     if not archive.is_file() or archive.stat().st_size == 0:
         raise SystemExit(f'missing SRA archive: {archive}')
-for key, count in baselines.items():
-    if count != 1:
-        raise SystemExit(f'{key}: expected exactly one baseline, found {count}')
+for key, data in keys.items():
+    if data['progression'] and data['baseline'] != 1:
+        raise SystemExit(f'{key}: expected one baseline for progression subtraction; found {data["baseline"]}')
 print(f'validated {len(rows)} samples and local SRA paths')
 PY
-[[ $? -eq 0 ]] && pass "Samplesheet and SRA paths" || fail "Samplesheet or SRA-path validation"
+then
+    pass "Samplesheet and SRA paths"
+else
+    fail "Samplesheet or SRA-path validation"
+fi
 
 section "Container integrity"
 containers=(
@@ -209,61 +255,30 @@ tar -tzf "$REFERENCE_DIR/${references[4]}" >/dev/null 2>&1 && pass "tar integrit
 tar -tzf "$REFERENCE_DIR/${references[5]}" >/dev/null 2>&1 && pass "tar integrity: ${references[5]}" || fail "tar integrity: ${references[5]}"
 VEP_ARCHIVE_LIST="$TEST_ROOT/vep_cache_archive.list"
 ARRIBA_ARCHIVE_LIST="$TEST_ROOT/arriba_archive.list"
-
-if tar -tzf "$REFERENCE_DIR/${references[4]}" > "$VEP_ARCHIVE_LIST"; then
-    pass "VEP archive listing"
-else
-    fail "VEP archive listing"
-fi
-
-if tar -tzf "$REFERENCE_DIR/${references[5]}" > "$ARRIBA_ARCHIVE_LIST"; then
-    pass "Arriba archive listing"
-else
-    fail "Arriba archive listing"
-fi
-
-if grep -Eq '(^|/)homo_sapiens/111_GRCh38(/|$)' "$VEP_ARCHIVE_LIST"; then
-    pass "VEP cache layout"
-else
-    fail "VEP cache layout"
-    grep -E 'homo_sapiens|111_GRCh38' "$VEP_ARCHIVE_LIST" | head -20 || true
-fi
-
-if grep -Fq 'blacklist_hg38_GRCh38' "$ARRIBA_ARCHIVE_LIST"; then
-    pass "Arriba blacklist asset"
-else
-    fail "Arriba blacklist asset"
-fi
-
-if grep -Fq 'known_fusions_hg38_GRCh38' "$ARRIBA_ARCHIVE_LIST"; then
-    pass "Arriba known-fusions asset"
-else
-    fail "Arriba known-fusions asset"
-fi
-
-if grep -Fq 'protein_domains_hg38_GRCh38' "$ARRIBA_ARCHIVE_LIST"; then
-    pass "Arriba protein-domains asset"
-else
-    fail "Arriba protein-domains asset"
-fi
+if tar -tzf "$REFERENCE_DIR/${references[4]}" > "$VEP_ARCHIVE_LIST"; then pass "VEP archive listing"; else fail "VEP archive listing"; fi
+if tar -tzf "$REFERENCE_DIR/${references[5]}" > "$ARRIBA_ARCHIVE_LIST"; then pass "Arriba archive listing"; else fail "Arriba archive listing"; fi
+grep -Eq '(^|/)homo_sapiens/111_GRCh38(/|$)' "$VEP_ARCHIVE_LIST" && pass "VEP cache layout" || fail "VEP cache layout"
+grep -Fq 'blacklist_hg38_GRCh38' "$ARRIBA_ARCHIVE_LIST" && pass "Arriba blacklist asset" || fail "Arriba blacklist asset"
+grep -Fq 'known_fusions_hg38_GRCh38' "$ARRIBA_ARCHIVE_LIST" && pass "Arriba known-fusions asset" || fail "Arriba known-fusions asset"
+grep -Fq 'protein_domains_hg38_GRCh38' "$ARRIBA_ARCHIVE_LIST" && pass "Arriba protein-domains asset" || fail "Arriba protein-domains asset"
 
 section "Workflow syntax and corruption checks"
 if grep -nE '&gt;|&lt;|&amp;|-&gt;' "$MAIN_NF"; then fail "main.nf contains HTML entities"; else pass "No HTML entities"; fi
 if grep -n $'\r' "$MAIN_NF" "$SLURM_FILE" >/dev/null; then fail "CRLF characters detected"; else pass "Unix line endings"; fi
-[[ $(grep -c '^process ' "$MAIN_NF") -eq 27 ]] && pass "Expected 27 process declarations" || fail "Unexpected process count: $(grep -c '^process ' "$MAIN_NF")"
 processes=(DOWNLOAD_REFERENCES SRA_TO_FASTQ CAT_FASTQ FASTQC_RAW TRIM_GALORE FASTQC_TRIMMED STAR_INDEX STAR_ALIGN SORT_INDEX_BAM SAMTOOLS_FLAGSTAT REF_INDEX MARK_DUPLICATES SPLIT_N_CIGAR HAPLOTYPE_CALLER GENOTYPE_FILTER BCFTOOLS_STATS VEP_ANNOTATE PYPGATK_FASTA ARRIBA FUSION_FASTA STRINGTIE_ASSEMBLY GFFCOMPARE_NOVEL SPLICE_PROTEIN_FASTA COMBINE_PROTEIN_FASTA PROGRESSION_SUBTRACT PROGRESSION_FASTA MULTIQC)
+[[ $(grep -c '^process ' "$MAIN_NF") -eq ${#processes[@]} ]] && pass "Expected ${#processes[@]} process declarations" || fail "Unexpected process count: $(grep -c '^process ' "$MAIN_NF")"
 for name in "${processes[@]}"; do [[ $(grep -c "^process $name " "$MAIN_NF") -eq 1 ]] && pass "Process declared once: $name" || fail "Process declaration count invalid: $name"; done
 
 section "Workflow command contracts"
-require_terms "Task-local fasterq scratch" "$MAIN_NF" "--split-files" "--threads \${task.cpus}" "--temp fasterq_tmp" "--outdir ." "rm -rf fasterq_tmp"
+require_terms "Task-local fasterq scratch" "$MAIN_NF" "--split-files" '--threads ${task.cpus}' "--temp fasterq_tmp" "--outdir ." "rm -rf fasterq_tmp"
 require_terms "Reference indexing" "$MAIN_NF" "samtools faidx genome.fa" "samtools dict -o genome.dict genome.fa"
 require_terms "STAR two-pass and Arriba BAM" "$MAIN_NF" "--twopassMode Basic" "--chimOutType WithinBAM HardClip" "--outSAMtype BAM Unsorted"
 require_terms "GATK bounded heaps" "$MAIN_NF" "-Xmx56g" "-Xmx28g" "--MAX_RECORDS_IN_RAM 1000000"
-require_terms "VEP all-transcript mode" "$MAIN_NF" "--cache_version 111" "--dir_cache" "--canonical" "--protein" "--hgvs" "--fork \${task.cpus}"
+require_terms "VEP all-transcript mode" "$MAIN_NF" "--cache_version 111" "--dir_cache" "--canonical" "--protein" "--hgvs" '--fork ${task.cpus}'
 reject_terms "VEP selected-transcript options absent" "$MAIN_NF" "--pick" "--flag_pick"
 require_terms "pypgatk 0.0.24 interface" "$MAIN_NF" "--vcf" "--input_fasta" "--gene_annotations_gtf" "--annotation_field_name CSQ" "--af_field AF" "--include_consequences" "--output_proteindb"
 reject_terms "Legacy pypgatk options absent" "$MAIN_NF" "--input-vcf" "--protein-db-fasta" "--consequence-filter" "--output-proteindb"
-require_terms "Claude zero-result guards" "$MAIN_NF" "no variant proteins generated" "no progression proteins generated"
+require_terms "Zero-result protein FASTA guards" "$MAIN_NF" "no variant proteins generated" "no progression proteins generated"
 require_terms "GFFCompare robust output handling" "$MAIN_NF" 'prefix=${meta.sample}.gffcompare' 'if [[ ! -s \${prefix}.annotated.gtf ]]' 'if [[ -s \${prefix}.stats ]]' 'No non-empty gffcompare statistics report' 'test -e ${meta.sample}.novel.gtf'
 require_terms "TransDecoder absolute paths" "$MAIN_NF" "/usr/local/opt/transdecoder/util/gtf_genome_to_cdna_fasta.pl" "/usr/local/opt/transdecoder/util/TransDecoder.LongOrfs" "/usr/local/opt/transdecoder/util/TransDecoder.Predict"
 require_terms "Reference routing" "$MAIN_NF" "PYPGATK_FASTA(annotated,refs.gtf,refs.cdna)" "PROGRESSION_FASTA(prog,refs.gtf,refs.cdna)" "COMBINE_PROTEIN_FASTA(combined_inputs,refs.proteome)"
@@ -271,6 +286,21 @@ require_terms "Novel class-code configuration" "$MAIN_NF" "params.splice_class_c
 require_terms "MultiQC aggregation" "$MAIN_NF" "raw_qc.qc" "trimmed_qc.qc" "trim_result.reports" "star_result.logs" "md_result.metrics" "variant_stats" "MULTIQC(qc_files)"
 reject_terms "No network downloads in main.nf" "$MAIN_NF" "curl " "wget " "prefetch "
 reject_terms "No obsolete workflow scratch configuration" "$MAIN_NF" "params.shared_tmp_root" "singularity.runOptions"
+
+section "GATK task-local temporary storage"
+for process_name in MARK_DUPLICATES SPLIT_N_CIGAR HAPLOTYPE_CALLER GENOTYPE_FILTER; do
+    check_process_terms "$process_name" \
+        "mkdir -p gatk_tmp" \
+        "trap 'rm -rf gatk_tmp' EXIT" \
+        '-Djava.io.tmpdir=\${PWD}/gatk_tmp'
+done
+
+section "SPLIT_N_CIGAR output contract"
+check_process_terms SPLIT_N_CIGAR \
+    'if [[ -s ${meta.sample}.split.bai && ! -e ${meta.sample}.split.bam.bai ]]; then' \
+    'mv ${meta.sample}.split.bai ${meta.sample}.split.bam.bai' \
+    'test -s ${meta.sample}.split.bam' \
+    'test -s ${meta.sample}.split.bam.bai'
 
 section "Resource contracts"
 check_process_resources DOWNLOAD_REFERENCES 8 "32 GB" normal
@@ -288,15 +318,12 @@ check_process_resources SPLICE_PROTEIN_FASTA 20 "64 GB" normal
 section "GFFCompare fixture smoke test"
 FIXTURE="$TEST_ROOT/gffcompare_fixture"
 mkdir -p "$FIXTURE"
-cat > "$FIXTURE/ref.gtf" <<'EOF'
-chr1	ref	exon	100	199	.	+	.	gene_id "REF1"; transcript_id "REF1.1";
-EOF
-cat > "$FIXTURE/query.gtf" <<'EOF'
-chr1	query	transcript	100	199	.	+	.	gene_id "Q1"; transcript_id "Q1.1";
-chr1	query	exon	100	199	.	+	.	gene_id "Q1"; transcript_id "Q1.1";
-chr1	query	transcript	300	399	.	+	.	gene_id "Q2"; transcript_id "Q2.1";
-chr1	query	exon	300	399	.	+	.	gene_id "Q2"; transcript_id "Q2.1";
-EOF
+printf 'chr1\tref\texon\t100\t199\t.\t+\t.\tgene_id "REF1"; transcript_id "REF1.1";\n' > "$FIXTURE/ref.gtf"
+printf '%s\n' \
+$'chr1\tquery\ttranscript\t100\t199\t.\t+\t.\tgene_id "Q1"; transcript_id "Q1.1";' \
+$'chr1\tquery\texon\t100\t199\t.\t+\t.\tgene_id "Q1"; transcript_id "Q1.1";' \
+$'chr1\tquery\ttranscript\t300\t399\t.\t+\t.\tgene_id "Q2"; transcript_id "Q2.1";' \
+$'chr1\tquery\texon\t300\t399\t.\t+\t.\tgene_id "Q2"; transcript_id "Q2.1";' > "$FIXTURE/query.gtf"
 if apptainer exec --cleanenv --bind "$FIXTURE:$FIXTURE" --pwd "$FIXTURE" "$CONTAINER_DIR/gffcompare-0.12.10.img" gffcompare -r ref.gtf -o fixture query.gtf >/dev/null 2>"$FIXTURE/stderr"; then
     [[ -s "$FIXTURE/fixture.annotated.gtf" ]] && pass "GFFCompare fixture annotated GTF" || fail "GFFCompare fixture annotated GTF missing"
     [[ -e "$FIXTURE/fixture.stats" ]] && pass "GFFCompare fixture stats path" || fail "GFFCompare fixture stats path missing"
@@ -310,7 +337,7 @@ section "Launcher contract"
 bash -n "$SLURM_FILE" && pass "scratch.slurm Bash syntax" || fail "scratch.slurm Bash syntax"
 require_terms "Launcher resources" "$SLURM_FILE" "#SBATCH --account=nn9036k" "#SBATCH --cpus-per-task=4" "#SBATCH --mem=16G" "#SBATCH --time=168:00:00"
 require_terms "Storage placement" "$SLURM_FILE" 'WORK_DIR="/cluster/work/users/ash022/work"' 'TMP_ROOT="/cluster/work/users/ash022/tmp"' '-work-dir "${WORK_DIR}"'
-require_terms "Native Apptainer configuration" "$SLURM_FILE" 'NXF_APPTAINER_CACHEDIR="${PROJECT_DIR}/singularity_cache"' 'APPTAINER_TMPDIR="${RUN_TMP}/apptainer"' '-with-apptainer'
+require_terms "Native Apptainer configuration" "$SLURM_FILE" 'NXF_APPTAINER_CACHEDIR="${PROJECT_DIR}/singularity_cache"' 'APPTAINER_TMPDIR="${RUN_TMP}/apptainer"' "-with-apptainer"
 require_terms "Java and Nextflow" "$SLURM_FILE" "module purge" "module load Java/21" 'NXF_OPTS="-Xms2g -Xmx12g"'
 require_terms "SLURM child-job account" "$SLURM_FILE" '"-process.clusterOptions=--account=nn9036k"'
 require_terms "Resume and trace" "$SLURM_FILE" "-resume" '-with-trace "${PROJECT_DIR}/results/pipeline_trace-${SLURM_JOB_ID}.tsv"'
@@ -318,12 +345,21 @@ reject_terms "No obsolete or suppressive launcher settings" "$SLURM_FILE" "modul
 
 section "SLURM scheduler syntax"
 if command -v sbatch >/dev/null 2>&1; then
-    if sbatch --test-only "$SLURM_FILE" >"$TEST_ROOT/sbatch_test.txt" 2>&1; then pass "sbatch --test-only"; sed -n '1,3p' "$TEST_ROOT/sbatch_test.txt"; else fail "sbatch --test-only"; cat "$TEST_ROOT/sbatch_test.txt"; fi
+    if sbatch --test-only "$SLURM_FILE" >"$TEST_ROOT/sbatch_test.txt" 2>&1; then
+        pass "sbatch --test-only"
+        sed -n '1,3p' "$TEST_ROOT/sbatch_test.txt"
+    else
+        fail "sbatch --test-only"
+        cat "$TEST_ROOT/sbatch_test.txt"
+    fi
 else
     warn "sbatch unavailable; scheduler validation skipped"
 fi
 
 section "Summary"
 printf 'PASS: %d\nWARN: %d\nFAIL: %d\nREPORT: %s\n' "$PASS" "$WARN" "$FAIL" "$REPORT"
-if (( FAIL > 0 )); then printf 'RESULT: FAILED\n'; exit 1; fi
+if (( FAIL > 0 )); then
+    printf 'RESULT: FAILED\n'
+    exit 1
+fi
 printf 'RESULT: PASSED\n'
