@@ -1,4 +1,4 @@
-python map_peptides_to_fasta.py --peptides peptides.txt --fasta TK12.exploratory_proteogenomics.fasta TK13.exploratory_proteogenomics.fasta TK14.exploratory_proteogenomics.fasta   --group-map 2=TK12   --group-map 3=TK13    --group-map 4=TK14  --output-prefix peptide_fasta_mapping
+#python map_peptides_to_fasta.py --peptides ./ftp.pride.ebi.ac.uk/pride/data/archive/2024/11/PXD033510/combined/txt/peptides.txt --fasta /cluster/home/ash022/FastaDB/uniprotkb_proteome_UP000005640_2026_06_25.fasta ./results/combined_fasta/TK12.exploratory_proteogenomics.fasta ./results/combined_fasta/TK13.exploratory_proteogenomics.fasta ./results/combined_fasta/TK14.exploratory_proteogenomics.fasta   --group-map 2=TK12   --group-map 3=TK13    --group-map 4=TK14  --output-prefix peptide_fasta_mapping
 
 import argparse
 import csv
