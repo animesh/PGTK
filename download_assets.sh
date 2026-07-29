@@ -322,6 +322,12 @@ download_asset \
     true
 
 download_asset \
+    'https://ftp.ensembl.org/pub/release-111/fasta/homo_sapiens/pep/Homo_sapiens.GRCh38.pep.all.fa.gz' \
+    "$REFERENCE_DIR/Homo_sapiens.GRCh38.pep.all.fa.gz" \
+    'Ensembl release 111 protein sequences' \
+    validate_gzip \
+    true
+download_asset \
     'https://ftp.ensembl.org/pub/release-111/variation/indexed_vep_cache/homo_sapiens_vep_111_GRCh38.tar.gz' \
     "$REFERENCE_DIR/homo_sapiens_vep_111_GRCh38.tar.gz" \
     'VEP cache' \
@@ -343,4 +349,4 @@ download_asset \
     validate_tar_gzip \
     true
 
-echo "All 15 containers and all reference archives are valid."
+echo "All 15 containers and all 7 reference archives are valid."

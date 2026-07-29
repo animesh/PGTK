@@ -132,6 +132,7 @@ printf 'Started: %s\nProject: %s\nReport: %s\n' "$(date --iso-8601=seconds)" "$P
 require_file "$MAIN_NF"
 require_file "$SLURM_FILE"
 require_file "$SAMPLES"
+require_file "$PROJECT_DIR/proteogenomics_evidence_report.py"
 command -v apptainer >/dev/null 2>&1 && pass "Apptainer found: $(command -v apptainer)" || fail "Apptainer missing"
 command -v java >/dev/null 2>&1 && pass "Java found: $(command -v java)" || fail "Java missing"
 command -v python >/dev/null 2>&1 && pass "Python found: $(command -v python)" || fail "Python missing"
@@ -249,18 +250,19 @@ references=(
 Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz
 Homo_sapiens.GRCh38.111.gtf.gz
 Homo_sapiens.GRCh38.cdna.all.fa.gz
+Homo_sapiens.GRCh38.pep.all.fa.gz
 human_reviewed_isoforms.fasta.gz
 homo_sapiens_vep_111_GRCh38.tar.gz
 arriba_v2.4.0.tar.gz
 )
 for name in "${references[@]}"; do require_file "$REFERENCE_DIR/$name"; done
-for name in "${references[@]:0:4}"; do gzip -t "$REFERENCE_DIR/$name" && pass "gzip integrity: $name" || fail "gzip integrity: $name"; done
-tar -tzf "$REFERENCE_DIR/${references[4]}" >/dev/null 2>&1 && pass "tar integrity: ${references[4]}" || fail "tar integrity: ${references[4]}"
+for name in "${references[@]:0:5}"; do gzip -t "$REFERENCE_DIR/$name" && pass "gzip integrity: $name" || fail "gzip integrity: $name"; done
 tar -tzf "$REFERENCE_DIR/${references[5]}" >/dev/null 2>&1 && pass "tar integrity: ${references[5]}" || fail "tar integrity: ${references[5]}"
+tar -tzf "$REFERENCE_DIR/${references[6]}" >/dev/null 2>&1 && pass "tar integrity: ${references[6]}" || fail "tar integrity: ${references[6]}"
 VEP_ARCHIVE_LIST="$TEST_ROOT/vep_cache_archive.list"
 ARRIBA_ARCHIVE_LIST="$TEST_ROOT/arriba_archive.list"
-if tar -tzf "$REFERENCE_DIR/${references[4]}" > "$VEP_ARCHIVE_LIST"; then pass "VEP archive listing"; else fail "VEP archive listing"; fi
-if tar -tzf "$REFERENCE_DIR/${references[5]}" > "$ARRIBA_ARCHIVE_LIST"; then pass "Arriba archive listing"; else fail "Arriba archive listing"; fi
+if tar -tzf "$REFERENCE_DIR/${references[5]}" > "$VEP_ARCHIVE_LIST"; then pass "VEP archive listing"; else fail "VEP archive listing"; fi
+if tar -tzf "$REFERENCE_DIR/${references[6]}" > "$ARRIBA_ARCHIVE_LIST"; then pass "Arriba archive listing"; else fail "Arriba archive listing"; fi
 grep -Eq '(^|/)homo_sapiens/111_GRCh38(/|$)' "$VEP_ARCHIVE_LIST" && pass "VEP cache layout" || fail "VEP cache layout"
 grep -Fq 'blacklist_hg38_GRCh38' "$ARRIBA_ARCHIVE_LIST" && pass "Arriba blacklist asset" || fail "Arriba blacklist asset"
 grep -Fq 'known_fusions_hg38_GRCh38' "$ARRIBA_ARCHIVE_LIST" && pass "Arriba known-fusions asset" || fail "Arriba known-fusions asset"
@@ -299,7 +301,7 @@ else
     fail "main.nf contains literal HTML entities"
 fi
 if grep -n $'\r' "$MAIN_NF" "$SLURM_FILE" >/dev/null; then fail "CRLF characters detected"; else pass "Unix line endings"; fi
-processes=(DOWNLOAD_REFERENCES SRA_TO_FASTQ CAT_FASTQ FASTQC_RAW TRIM_GALORE FASTQC_TRIMMED STAR_INDEX STAR_ALIGN SORT_INDEX_BAM SAMTOOLS_FLAGSTAT REF_INDEX MARK_DUPLICATES SPLIT_N_CIGAR HAPLOTYPE_CALLER GENOTYPE_FILTER BCFTOOLS_STATS VEP_ANNOTATE PYPGATK_FASTA ARRIBA FUSION_FASTA STRINGTIE_ASSEMBLY GFFCOMPARE_NOVEL SPLICE_PROTEIN_FASTA COMBINE_PROTEIN_FASTA PROGRESSION_SUBTRACT PROGRESSION_FASTA MULTIQC)
+processes=(DOWNLOAD_REFERENCES SRA_TO_FASTQ CAT_FASTQ FASTQC_RAW TRIM_GALORE FASTQC_TRIMMED STAR_INDEX STAR_ALIGN SORT_INDEX_BAM SAMTOOLS_FLAGSTAT REF_INDEX MARK_DUPLICATES SPLIT_N_CIGAR HAPLOTYPE_CALLER GENOTYPE_FILTER BCFTOOLS_STATS VEP_ANNOTATE PYPGATK_FASTA ARRIBA FUSION_FASTA STRINGTIE_ASSEMBLY GFFCOMPARE_NOVEL SPLICE_PROTEIN_FASTA COMBINE_PROTEIN_FASTA PROGRESSION_SUBTRACT PROGRESSION_FASTA MULTIQC VALIDATE_MAXQUANT_INPUTS MAP_MAXQUANT_PEPTIDES ANNOTATE_MAXQUANT_VARIANTS ANALYZE_MAXQUANT_JUNCTIONS VALIDATE_MAXQUANT_SPLICE_JUNCTIONS BUILD_PROTEOGENOMICS_EVIDENCE_REPORT)
 [[ $(grep -c '^process ' "$MAIN_NF") -eq ${#processes[@]} ]] && pass "Expected ${#processes[@]} process declarations" || fail "Unexpected process count: $(grep -c '^process ' "$MAIN_NF")"
 for name in "${processes[@]}"; do [[ $(grep -c "^process $name " "$MAIN_NF") -eq 1 ]] && pass "Process declared once: $name" || fail "Process declaration count invalid: $name"; done
 
@@ -323,6 +325,33 @@ reject_terms "Obsolete MultiQC output absent" "$MAIN_NF" "path 'multiqc_data'"
 reject_terms "No network downloads in main.nf" "$MAIN_NF" "curl " "wget " "prefetch "
 reject_terms "No obsolete workflow scratch configuration" "$MAIN_NF" "params.shared_tmp_root" "singularity.runOptions"
 
+require_terms "Optional MaxQuant branch" "$MAIN_NF" \
+    "params.run_proteogenomic_validation = false" \
+    "params.maxquant_txt = null" \
+    "params.maxquant_mqpar = null" \
+    "VALIDATE_MAXQUANT_INPUTS" \
+    "MAP_MAXQUANT_PEPTIDES" \
+    "ANNOTATE_MAXQUANT_VARIANTS" \
+    "ANALYZE_MAXQUANT_JUNCTIONS" \
+    "VALIDATE_MAXQUANT_SPLICE_JUNCTIONS" \
+    "BUILD_PROTEOGENOMICS_EVIDENCE_REPORT" \
+    "proteogenomics_evidence.report.md"
+require_terms "MaxQuant raw-file evidence inputs" "$MAIN_NF" \
+    'mq_evidence = file("${params.maxquant_txt}/evidence.txt"' \
+    'mq_msms = file("${params.maxquant_txt}/msms.txt"' \
+    'mq_protein_groups = file("${params.maxquant_txt}/proteinGroups.txt"'
+require_terms "Ensembl peptide reference" "$PROJECT_DIR/download_assets.sh" \
+    "Homo_sapiens.GRCh38.pep.all.fa.gz" \
+    "Ensembl release 111 protein sequences"
+section "Python post-processing scripts"
+for script in map_peptides_to_fasta.py annotate_variant_peptides.py analyze_chimeric_splice_peptides.py validate_splice_junction_peptides.py proteogenomics_evidence_report.py; do
+    require_file "$PROJECT_DIR/$script"
+    if python -m py_compile "$PROJECT_DIR/$script"; then
+        pass "Python syntax: $script"
+    else
+        fail "Python syntax: $script"
+    fi
+done
 section "pypgatk VCF input contracts"
 check_process_terms PYPGATK_FASTA \
     'gzip -t ${vcf}' \
@@ -402,7 +431,7 @@ require_terms "Storage placement" "$SLURM_FILE" 'WORK_DIR="/cluster/work/users/a
 require_terms "Native Apptainer configuration" "$SLURM_FILE" 'NXF_APPTAINER_CACHEDIR="${PROJECT_DIR}/singularity_cache"' 'APPTAINER_TMPDIR="${RUN_TMP}/apptainer"' "-with-apptainer"
 require_terms "Java and Nextflow" "$SLURM_FILE" "module purge" "module load Java/21" 'NXF_OPTS="-Xms2g -Xmx12g"'
 require_terms "SLURM child-job account" "$SLURM_FILE" '"-process.clusterOptions=--account=nn9036k"'
-require_terms "Resume and trace" "$SLURM_FILE" "-resume" '-with-trace "${PROJECT_DIR}/results/pipeline_trace-${SLURM_JOB_ID}.tsv"'
+require_terms "Resume, trace, and optional argument forwarding" "$SLURM_FILE" "-resume" '-with-trace "${PROJECT_DIR}/results/pipeline_trace-${SLURM_JOB_ID}.tsv"' '"$@"'
 reject_terms "No obsolete or suppressive launcher settings" "$SLURM_FILE" "module --force purge" "-with-singularity" "NXF_SINGULARITY_CACHEDIR" "SINGULARITY_TMPDIR" "MESSAGELEVEL" "-with-report" "-with-timeline" "singularity.runOptions"
 
 section "SLURM scheduler syntax"

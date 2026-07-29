@@ -295,8 +295,15 @@ def main():
         writer = csv.DictWriter(handle, fields, delimiter="\t", lineterminator="\n")
         writer.writeheader(); writer.writerows(output_rows)
 
-    priority_rows = [r for r in output_rows if r["Peptide spans VEP protein position"] == "yes" and r["Peptide found in Ensembl reference protein"] in {"no", "unknown"}]
-    priority_rows.sort(key=lambda r: (float(r["PEP"] or 1), -float(r["MS/MS Count"] or 0), r["Sequence"]))
+    # This compatibility output contains all altered-residue associations that are
+    # absent from the corresponding Ensembl reference protein. No analyst-defined
+    # PEP, score, PSM-count, or peptide-length threshold is applied here.
+    priority_rows = [
+        row for row in output_rows
+        if row.get("Peptide spans VEP protein position") == "yes"
+        and row.get("Peptide found in Ensembl reference protein") in {"no", "unknown"}
+    ]
+    priority_rows.sort(key=lambda row: (row["Sequence"], row["FASTA sample"], row["Chromosome"], int(row["Position"]), row["Transcript"]))
     with prioritized.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fields, delimiter="\t", lineterminator="\n")
         writer.writeheader(); writer.writerows(priority_rows)
@@ -313,9 +320,9 @@ def main():
         handle.write(f"Variant annotation rows: {len(output_rows)}\n")
         handle.write(f"Unique annotated peptides: {len(unique_peptides)}\n")
         handle.write(f"Unique peptides spanning VEP protein position: {len(spanning)}\n")
-        handle.write(f"Unique prioritized altered peptides: {len(priority)}\n")
+        handle.write(f"Unique reference-absent altered-residue peptides: {len(priority)}\n")
         handle.write(f"Unresolved mappings: {len(unresolved)}\n")
-        handle.write("\nPrioritized peptides:\n")
+        handle.write("\nReference-absent altered-residue peptides (no analyst thresholds):\n")
         for peptide in sorted(priority):
             annotations = [r for r in priority_rows if r["Sequence"] == peptide]
             top = annotations[0]
@@ -325,7 +332,7 @@ def main():
     print(f"Wrote {prioritized}")
     print(f"Wrote {summary}")
     print(f"Wrote {unresolved_path}")
-    print(f"Unique prioritized altered peptides: {len(priority)}")
+    print(f"Unique reference-absent altered-residue peptides: {len(priority)}")
 
 
 if __name__ == "__main__":

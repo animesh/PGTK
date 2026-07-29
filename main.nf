@@ -12,6 +12,12 @@ params.splice_min_junction_reads = 3
 params.splice_min_isoform_fraction = 0.05
 params.splice_min_protein_aa = 60
 params.splice_class_codes = 'j,u'
+params.run_proteogenomic_validation = false
+params.maxquant_txt = null
+params.maxquant_mqpar = null
+params.maxquant_canonical_fasta = null
+params.maxquant_contaminants = '/cluster/home/ash022/scripts/MaxQuant_v2.8.1.0/bin/conf/contaminants.fasta'
+params.ensembl_pep = "${projectDir}/reference_downloads/Homo_sapiens.GRCh38.pep.all.fa.gz"
 
 process DOWNLOAD_REFERENCES {
     tag 'GRCh38_Ensembl111'
@@ -690,6 +696,228 @@ process MULTIQC {
     """
 }
 
+process VALIDATE_MAXQUANT_INPUTS {
+    tag 'maxquant_inputs'
+    cpus 1; memory '4 GB'; time '1h'; disk '10 GB'; queue 'normal'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/proteogenomics_validation", mode:'copy'
+    input:
+    path peptides
+    path evidence
+    path msms
+    path protein_groups
+    path mqpar
+    path canonical_fasta
+    path contaminants_fasta
+    output:
+    path 'maxquant_inputs.validated.txt'
+    script:
+    """
+    set -euo pipefail
+    python - ${peptides} ${evidence} ${msms} ${protein_groups} ${mqpar} ${canonical_fasta} ${contaminants_fasta} <<'PY_MQ'
+import csv
+import pathlib
+import sys
+import xml.etree.ElementTree as ET
+
+peptides, evidence, msms, protein_groups, mqpar, canonical, contaminants = map(pathlib.Path, sys.argv[1:])
+for path in (peptides, evidence, msms, protein_groups, mqpar, canonical, contaminants):
+    if not path.is_file() or path.stat().st_size == 0:
+        raise SystemExit(f'missing or empty input: {path}')
+required = {
+    peptides: {'Sequence', 'PEP', 'Score', 'MS/MS Count', 'Evidence IDs', 'MS/MS IDs', 'Protein group IDs'},
+    evidence: {'id', 'Sequence', 'Raw file', 'Experiment', 'PEP', 'Score', 'MS/MS IDs'},
+    msms: {'id', 'Sequence', 'Raw file', 'Scan number', 'Score', 'PEP'},
+    protein_groups: {'id', 'Protein IDs'},
+}
+for table, expected in required.items():
+    with table.open(encoding='utf-8', errors='replace', newline='') as handle:
+        fields = set(csv.DictReader(handle, delimiter='\t').fieldnames or [])
+    missing = expected - fields
+    if missing:
+        raise SystemExit(f'{table.name} missing columns: {sorted(missing)}')
+root = ET.parse(mqpar).getroot()
+version = (root.findtext('maxQuantVersion') or '').strip()
+fastas = [(node.text or '').strip() for node in root.findall('./fastaFiles/FastaFileInfo/fastaFilePath')]
+if not version or not fastas:
+    raise SystemExit('mqpar.xml lacks MaxQuant version or searched FASTA paths')
+if (root.findtext('includeContaminants') or '').strip().lower() != 'true':
+    raise SystemExit('mqpar.xml does not report includeContaminants=True')
+with open('maxquant_inputs.validated.txt', 'w', encoding='utf-8') as handle:
+    print(f'MaxQuant version: {version}', file=handle)
+    print(f'Searched FASTA files: {len(fastas)}', file=handle)
+    print(f'Canonical FASTA supplied: {canonical}', file=handle)
+    print(f'Contaminant FASTA supplied: {contaminants}', file=handle)
+PY_MQ
+    """
+}
+
+process MAP_MAXQUANT_PEPTIDES {
+    tag 'peptide_fasta_mapping'
+    cpus 4; memory '24 GB'; time '12h'; disk '40 GB'; queue 'normal'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/proteogenomics_validation", mode:'copy'
+    input:
+    path validation_stamp
+    path peptides
+    path canonical_fasta
+    path contaminants_fasta
+    path combined_fastas
+    path mapper_script
+    output:
+    path 'peptide_fasta_mapping.mapping.tsv', emit: mapping
+    path 'peptide_fasta_mapping.candidates.tsv', emit: candidates
+    path 'peptide_fasta_mapping.summary.txt', emit: summary
+    script:
+    """
+    set -euo pipefail
+    python ${mapper_script} \\
+        --peptides ${peptides} \\
+        --fasta ${canonical_fasta} ${contaminants_fasta} ${combined_fastas} \\
+        --group-map 2=TK12 \\
+        --group-map 3=TK13 \\
+        --group-map 4=TK14 \\
+        --output-prefix peptide_fasta_mapping
+    """
+}
+
+process ANNOTATE_MAXQUANT_VARIANTS {
+    tag 'variant_peptide_annotation'
+    cpus 4; memory '24 GB'; time '12h'; disk '40 GB'; queue 'normal'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/proteogenomics_validation", mode:'copy'
+    input:
+    path validation_stamp
+    path candidates
+    path vep_vcfs
+    path combined_fastas
+    path ensembl_pep
+    path annotation_script
+    output:
+    path 'variant_peptide_annotation.detailed.tsv', emit: detailed
+    path 'variant_peptide_annotation.prioritized.tsv', emit: prioritized
+    path 'variant_peptide_annotation.summary.txt', emit: summary
+    path 'variant_peptide_annotation.unresolved.tsv', emit: unresolved
+    script:
+    """
+    set -euo pipefail
+    python ${annotation_script} \\
+        --candidates ${candidates} \\
+        --vep-vcf ${vep_vcfs} \\
+        --variant-fasta ${combined_fastas} \\
+        --ensembl-pep ${ensembl_pep} \\
+        --il-equivalent \\
+        --output-prefix variant_peptide_annotation
+    """
+}
+
+process ANALYZE_MAXQUANT_JUNCTIONS {
+    tag 'junction_peptide_analysis'
+    cpus 4; memory '24 GB'; time '12h'; disk '40 GB'; queue 'normal'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/proteogenomics_validation", mode:'copy'
+    input:
+    path validation_stamp
+    path peptides
+    path canonical_fasta
+    path contaminants_fasta
+    path fusion_fastas
+    path splice_fastas
+    path arriba_tables
+    path junction_script
+    output:
+    path 'junction_peptide_analysis.all_mappings.tsv', emit: all_mappings
+    path 'junction_peptide_analysis.fusion_candidates.tsv', emit: fusion_candidates
+    path 'junction_peptide_analysis.splice_candidates.tsv', emit: splice_candidates
+    path 'junction_peptide_analysis.inferred_junctions.tsv', emit: inferred
+    path 'junction_peptide_analysis.summary.txt', emit: summary
+    script:
+    """
+    set -euo pipefail
+    python ${junction_script} \\
+        --peptides ${peptides} \\
+        --canonical-fasta ${canonical_fasta} ${contaminants_fasta} \\
+        --fusion-fasta ${fusion_fastas} \\
+        --splice-fasta ${splice_fastas} \\
+        --arriba ${arriba_tables} \\
+        --group-map 2=TK12 \\
+        --group-map 3=TK13 \\
+        --group-map 4=TK14 \\
+        --output-prefix junction_peptide_analysis
+    """
+}
+
+process VALIDATE_MAXQUANT_SPLICE_JUNCTIONS {
+    tag 'validated_splice_junctions'
+    cpus 4; memory '24 GB'; time '12h'; disk '40 GB'; queue 'normal'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/proteogenomics_validation", mode:'copy'
+    input:
+    path validation_stamp
+    path candidates
+    path splice_fastas
+    path transcript_gtfs
+    path reference_gtf
+    path validation_script
+    output:
+    path 'validated_splice_junctions.detailed.tsv', emit: detailed
+    path 'validated_splice_junctions.junction_spanning.tsv', emit: spanning
+    path 'validated_splice_junctions.prioritized_novel_junctions.tsv', emit: prioritized
+    path 'validated_splice_junctions.unresolved.tsv', emit: unresolved
+    path 'validated_splice_junctions.summary.txt', emit: summary
+    script:
+    """
+    set -euo pipefail
+    python ${validation_script} \\
+        --candidates ${candidates} \\
+        --splice-fasta ${splice_fastas} \\
+        --transcript-gtf ${transcript_gtfs} \\
+        --reference-gtf ${reference_gtf} \\
+        --output-prefix validated_splice_junctions
+    """
+}
+
+process BUILD_PROTEOGENOMICS_EVIDENCE_REPORT {
+    tag 'proteogenomics_evidence_report'
+    cpus 4; memory '32 GB'; time '12h'; disk '40 GB'; queue 'normal'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/proteogenomics_validation", mode:'copy'
+    input:
+    path validation_stamp
+    path samplesheet
+    path mqpar
+    path evidence
+    path msms
+    path protein_groups
+    path vep_vcfs
+    path variant_annotation
+    path peptide_mapping
+    path splice_validation
+    path searched_fastas
+    path report_script
+    output:
+    path 'proteogenomics_evidence.variants.tsv'
+    path 'proteogenomics_evidence.junctions.tsv'
+    path 'proteogenomics_evidence.report.md'
+    path 'proteogenomics_evidence.summary.txt'
+    script:
+    """
+    set -euo pipefail
+    python ${report_script} \\
+        --samples ${samplesheet} \\
+        --mqpar ${mqpar} \\
+        --evidence ${evidence} \\
+        --msms ${msms} \\
+        --protein-groups ${protein_groups} \\
+        --vep-vcf ${vep_vcfs} \\
+        --variant-annotation ${variant_annotation} \\
+        --peptide-mapping ${peptide_mapping} \\
+        --splice-validation ${splice_validation} \\
+        --searched-fasta ${searched_fastas} \\
+        --output-prefix proteogenomics_evidence
+    """
+}
+
 workflow {
     samples = channel.fromPath(params.samplesheet, checkIfExists:true).splitCsv(header:true).map { row ->
         if (!row.sample || !row.srr || !row.TK || !row.Group) error 'samples.csv requires sample,srr,TK,Group,baseline'
@@ -730,7 +958,7 @@ workflow {
         .join(fusion_keyed)
         .join(splice_keyed)
         .map { sample,m1,vf,m2,ff,m3,sf -> tuple(m1,vf,ff,sf) }
-    COMBINE_PROTEIN_FASTA(combined_inputs,refs.proteome)
+    combined_fasta=COMBINE_PROTEIN_FASTA(combined_inputs,refs.proteome)
     groups=annotated.branch { m,v,t -> baseline:m.baseline=='true'; progression:m.baseline=='false'; other:true }
     bases=groups.baseline.map { m,v,t -> tuple(m.tk,v,t) }
     pairs=groups.progression.map { m,v,t -> tuple(m.tk,m,v,t) }.combine(bases,by:0).map { k,m,pv,pt,bv,bt -> tuple(m,pv,pt,bv,bt) }
@@ -742,4 +970,41 @@ workflow {
              flagstat, md_result.metrics, variant_stats)
         .collect()
     MULTIQC(qc_files)
+
+    if (params.run_proteogenomic_validation) {
+        if (!params.maxquant_txt) error '--maxquant_txt is required when --run_proteogenomic_validation is enabled'
+        if (!params.maxquant_mqpar) error '--maxquant_mqpar is required when --run_proteogenomic_validation is enabled'
+        if (!params.maxquant_canonical_fasta) error '--maxquant_canonical_fasta is required when --run_proteogenomic_validation is enabled'
+
+        mq_peptides = file("${params.maxquant_txt}/peptides.txt", checkIfExists:true)
+        mq_evidence = file("${params.maxquant_txt}/evidence.txt", checkIfExists:true)
+        mq_msms = file("${params.maxquant_txt}/msms.txt", checkIfExists:true)
+        mq_protein_groups = file("${params.maxquant_txt}/proteinGroups.txt", checkIfExists:true)
+        mq_mqpar = file(params.maxquant_mqpar, checkIfExists:true)
+        mq_canonical = file(params.maxquant_canonical_fasta, checkIfExists:true)
+        mq_contaminants = file(params.maxquant_contaminants, checkIfExists:true)
+        ensembl_pep = file(params.ensembl_pep, checkIfExists:true)
+
+        mapper_script = file("${projectDir}/map_peptides_to_fasta.py", checkIfExists:true)
+        annotation_script = file("${projectDir}/annotate_variant_peptides.py", checkIfExists:true)
+        junction_script = file("${projectDir}/analyze_chimeric_splice_peptides.py", checkIfExists:true)
+        splice_validation_script = file("${projectDir}/validate_splice_junction_peptides.py", checkIfExists:true)
+        report_script = file("${projectDir}/proteogenomics_evidence_report.py", checkIfExists:true)
+        report_samplesheet = file(params.samplesheet, checkIfExists:true)
+
+        validation_stamp = VALIDATE_MAXQUANT_INPUTS(mq_peptides, mq_evidence, mq_msms, mq_protein_groups, mq_mqpar, mq_canonical, mq_contaminants)
+        combined_fastas_for_validation = combined_fasta.map { m,f -> f }.collect()
+        fusion_fastas_for_validation = fusion_fasta.map { m,f -> f }.collect()
+        splice_fastas_for_validation = splice_fasta.map { m,f -> f }.collect()
+        assembled_gtfs_for_validation = assembled.map { m,g -> g }.collect()
+        arriba_tables_for_validation = arriba_result.accepted.map { m,f -> f }.collect()
+        vep_vcfs_for_validation = annotated.map { m,v,t -> v }.collect()
+        searched_fastas_for_report = combined_fastas_for_validation.map { fastas -> fastas + [mq_canonical] }
+
+        peptide_mapping = MAP_MAXQUANT_PEPTIDES(validation_stamp, mq_peptides, mq_canonical, mq_contaminants, combined_fastas_for_validation, mapper_script)
+        variant_annotation = ANNOTATE_MAXQUANT_VARIANTS(validation_stamp, peptide_mapping.mapping, vep_vcfs_for_validation, combined_fastas_for_validation, ensembl_pep, annotation_script)
+        junction_analysis = ANALYZE_MAXQUANT_JUNCTIONS(validation_stamp, mq_peptides, mq_canonical, mq_contaminants, fusion_fastas_for_validation, splice_fastas_for_validation, arriba_tables_for_validation, junction_script)
+        splice_validation = VALIDATE_MAXQUANT_SPLICE_JUNCTIONS(validation_stamp, junction_analysis.splice_candidates, splice_fastas_for_validation, assembled_gtfs_for_validation, refs.gtf, splice_validation_script)
+        BUILD_PROTEOGENOMICS_EVIDENCE_REPORT(validation_stamp, report_samplesheet, mq_mqpar, mq_evidence, mq_msms, mq_protein_groups, vep_vcfs_for_validation, variant_annotation.detailed, peptide_mapping.mapping, splice_validation.detailed, searched_fastas_for_report, report_script)
+    }
 }
