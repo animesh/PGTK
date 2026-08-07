@@ -677,6 +677,11 @@ Sarek therefore provides strong independent support for most PGTK small variants
 - MaxQuant evidence depends on the exact searched FASTA set and search configuration.
 - Custom FASTAs can increase the search space and require appropriate false-discovery-rate control.
 
-## License and contribution
 
-Add the intended repository license before public release. Contributions should preserve the validation suite and include an updated regression check for any new process, output, parameter, or runtime dependency.
+## License
+
+See [LICENSE](LICENSE) for details.
+
+## Contact
+
+For questions about the workflow or data, open an issue or contact `animesh@fuzzylife.org`.
