@@ -69,13 +69,90 @@ def normalize_chromosome(value):
     return value[3:] if value.lower().startswith("chr") else value
 
 
-def sample_from_name(value):
-    match = re.search(r"(TK12|TK13|TK14)", value or "", re.IGNORECASE)
-    return match.group(1).upper() if match else ""
+def normalize_raw_file(value):
+    value = (value or "").strip().replace("\\", "/")
+    return Path(value).stem
+
+
+def default_sample_from_raw_file(value, valid_samples):
+    raw = normalize_raw_file(value)
+    matches = [sample for sample in valid_samples if re.search(rf"(?<![A-Za-z0-9]){re.escape(sample)}(?![A-Za-z0-9])", raw, re.IGNORECASE)]
+    if len(matches) > 1:
+        raise ValueError(f"Raw file maps ambiguously by default naming: {raw} -> {matches}")
+    return matches[0] if matches else ""
+
+
+def load_raw_file_map(path, valid_samples):
+    mapping = {}
+    if not path:
+        return mapping
+    rows = read_delimited(path)
+    if not rows:
+        raise ValueError(f"Raw-file mapping is empty: {path}")
+    fields = set(rows[0])
+    raw_column = next((name for name in ("raw_file", "Raw file", "raw", "filename") if name in fields), None)
+    sample_column = next((name for name in ("sample", "Sample", "rna_sample") if name in fields), None)
+    if not raw_column or not sample_column:
+        raise ValueError("Raw-file mapping requires columns raw_file and sample")
+    for row in rows:
+        raw = normalize_raw_file(row.get(raw_column))
+        sample = (row.get(sample_column) or "").strip()
+        if not raw or not sample:
+            raise ValueError(f"Incomplete raw-file mapping row: {row}")
+        if sample not in valid_samples:
+            raise ValueError(f"Mapped sample is absent from samples.csv: {sample}")
+        if raw in mapping and mapping[raw] != sample:
+            raise ValueError(f"Conflicting raw-file mapping for {raw}: {mapping[raw]} versus {sample}")
+        mapping[raw] = sample
+    return mapping
+
+
+def resolve_raw_file_samples(evidence_by_sequence, valid_samples, explicit_mapping):
+    raw_files = sorted({normalize_raw_file(row.get("Raw file")) for rows in evidence_by_sequence.values() for row in rows if row.get("Raw file")})
+    resolved = {}
+    unresolved = []
+    for raw in raw_files:
+        sample = explicit_mapping.get(raw) if explicit_mapping else default_sample_from_raw_file(raw, valid_samples)
+        if not sample:
+            unresolved.append(raw)
+        else:
+            resolved[raw] = sample
+    if unresolved:
+        mode = "explicit mapping" if explicit_mapping else "default sample-name search"
+        raise ValueError(f"Unresolved MaxQuant raw files using {mode}: {';'.join(unresolved)}")
+    return resolved
+
+
+def format_replicate_counts(raw_files, raw_sample_map):
+    counts = defaultdict(int)
+    for raw in raw_files:
+        sample = raw_sample_map.get(normalize_raw_file(raw), "")
+        if sample:
+            counts[sample] += 1
+    return ";".join(f"{sample}:{counts[sample]}" for sample in sorted(counts))
 
 
 def sorted_join(values):
     return ";".join(sorted({str(value).strip() for value in values if str(value).strip()}))
+
+
+def evidence_classes(rna_samples, direct_samples, mbr_samples):
+    rna=set(filter(None,rna_samples)); direct=set(filter(None,direct_samples)); mbr=set(filter(None,mbr_samples))
+    groups={
+        "SAMPLE_MATCHED_DIRECT_MSMS":rna & direct,
+        "CROSS_SAMPLE_DIRECT_MSMS":direct - rna,
+        "SAMPLE_MATCHED_MBR_ONLY":rna & mbr,
+        "CROSS_SAMPLE_MBR_ONLY":mbr - rna,
+    }
+    labels=[label for label,values in groups.items() if values]
+    return {
+        "Evidence classifications":";".join(labels or ["NO_MS_EVIDENCE"]),
+        "Sample-matched direct MS/MS samples":sorted_join(groups["SAMPLE_MATCHED_DIRECT_MSMS"]),
+        "Cross-sample direct MS/MS samples":sorted_join(groups["CROSS_SAMPLE_DIRECT_MSMS"]),
+        "Sample-matched MBR-only samples":sorted_join(groups["SAMPLE_MATCHED_MBR_ONLY"]),
+        "Cross-sample MBR-only samples":sorted_join(groups["CROSS_SAMPLE_MBR_ONLY"]),
+        "Primary sample-specific evidence":"yes" if groups["SAMPLE_MATCHED_DIRECT_MSMS"] else "no",
+    }
 
 
 def read_samples(path):
@@ -103,6 +180,10 @@ def parse_mqpar(path):
         "version": text("maxQuantVersion", "unknown"),
         "include_contaminants": text("includeContaminants", "unknown"),
         "match_between_runs": text("matchBetweenRuns", "unknown"),
+        "match_unidentified_features": text("matchUnidentifiedFeatures", "unknown"),
+        "match_between_runs_fdr": text("matchBetweenRunsFdr", "unknown"),
+        "matching_time_window": text("matchingTimeWindow", "unknown"),
+        "alignment_time_window": text("alignmentTimeWindow", "unknown"),
         "peptide_fdr": text("peptideFdr", "unknown"),
         "protein_fdr": text("proteinFdr", "unknown"),
         "min_peptide_length": text("minPeptideLength", "unknown"),
@@ -156,10 +237,17 @@ def validate_protein_groups(path):
         raise ValueError(f"proteinGroups.txt missing columns: {sorted(missing)}")
 
 
-def parse_vep_vcfs(paths):
+def parse_vep_vcfs(paths, valid_samples):
     events = defaultdict(list)
     for path in paths:
-        sample = sample_from_name(Path(path).name)
+        sample = default_sample_from_raw_file(
+            Path(path).name,
+            valid_samples,
+        )
+        if not sample:
+            raise ValueError(
+                f"Cannot map VEP VCF filename to a samples.csv ID: {path}"
+            )
         with open_text(path) as handle:
             csq_fields = None
             for line in handle:
@@ -253,16 +341,22 @@ def passes_user_filters(row, mapping_row, filters):
     return True
 
 
-def evidence_summary(peptides, evidence_by_sequence, msms_by_id):
-    raw_files, experiments, evidence_ids, msms_ids, scans = set(), set(), set(), set(), set()
+def evidence_summary(peptides, evidence_by_sequence, msms_by_id, raw_sample_map):
+    any_raw_files, direct_raw_files = set(), set()
+    experiments, evidence_ids, msms_ids, scans = set(), set(), set(), set()
     peps, scores = [], []
     contaminant = False
+    direct_rows = 0
+    transferred_rows = 0
     for peptide in sorted(peptides):
         for row in evidence_by_sequence.get(peptide, []):
             raw = (row.get("Raw file") or "").strip()
             experiment = (row.get("Experiment") or "").strip()
+            row_msms_ids = split_ids(row.get("MS/MS IDs"))
             if raw:
-                raw_files.add(raw)
+                any_raw_files.add(raw)
+                if row_msms_ids:
+                    direct_raw_files.add(raw)
             if experiment:
                 experiments.add(experiment)
             if row.get("id"):
@@ -270,18 +364,34 @@ def evidence_summary(peptides, evidence_by_sequence, msms_by_id):
             contaminant = contaminant or (row.get("Potential contaminant") or "").strip() == "+"
             peps.append(safe_float(row.get("PEP"), 1.0))
             scores.append(safe_float(row.get("Score"), 0.0))
-            for msms_id in split_ids(row.get("MS/MS IDs")):
+            direct_rows += int(bool(row_msms_ids))
+            transferred_rows += int(not row_msms_ids)
+            for msms_id in row_msms_ids:
                 msms_ids.add(msms_id)
                 msms = msms_by_id.get(msms_id)
                 if msms and msms.get("Scan number"):
                     scans.add(f"{msms.get('Raw file') or raw}:{msms['Scan number']}")
-    detection_samples = {sample_from_name(raw) for raw in raw_files}
-    detection_samples.discard("")
+    any_samples = {raw_sample_map.get(normalize_raw_file(raw), "") for raw in any_raw_files}
+    direct_samples = {raw_sample_map.get(normalize_raw_file(raw), "") for raw in direct_raw_files}
+    any_samples.discard(""); direct_samples.discard("")
+    mbr_only_samples = any_samples - direct_samples
+    mbr_only_raw_files = any_raw_files - direct_raw_files
     number_key = lambda value: (0, int(value)) if value.isdigit() else (1, value)
     return {
-        "MS evidence": "yes" if raw_files else "no",
-        "MS detection samples": sorted_join(detection_samples),
-        "Raw files": sorted_join(raw_files),
+        "MS evidence": "yes" if any_raw_files else "no",
+        "MS detection samples": sorted_join(direct_samples),
+        "Direct MS/MS samples": sorted_join(direct_samples),
+        "MBR-only samples": sorted_join(mbr_only_samples),
+        "Any evidence samples": sorted_join(any_samples),
+        "Raw files": sorted_join(any_raw_files),
+        "Direct MS/MS raw files": sorted_join(direct_raw_files),
+        "MBR-only raw files": sorted_join(mbr_only_raw_files),
+        "Direct MS/MS replicate counts": format_replicate_counts(direct_raw_files, raw_sample_map),
+        "MBR-only replicate counts": format_replicate_counts(mbr_only_raw_files, raw_sample_map),
+        "Any evidence replicate counts": format_replicate_counts(any_raw_files, raw_sample_map),
+        "Direct MS/MS replicate total": str(len(direct_raw_files)),
+        "MBR-only replicate total": str(len(mbr_only_raw_files)),
+        "Any evidence replicate total": str(len(any_raw_files)),
         "Experiments": sorted_join(experiments),
         "Evidence IDs": ";".join(sorted(evidence_ids, key=number_key)),
         "MS/MS IDs": ";".join(sorted(msms_ids, key=number_key)),
@@ -289,11 +399,12 @@ def evidence_summary(peptides, evidence_by_sequence, msms_by_id):
         "Best PEP": f"{min(peps):.6g}" if peps else "",
         "Best score": f"{max(scores):.6g}" if scores else "",
         "PSM count": str(len(msms_ids)),
+        "Direct evidence rows": str(direct_rows),
+        "Transferred evidence rows": str(transferred_rows),
         "Contaminant evidence": "yes" if contaminant else "no",
     }
 
-
-def build_variant_rows(events, annotations, mapping, evidence_by_sequence, msms_by_id, samples, mqpar, filters):
+def build_variant_rows(events, annotations, mapping, evidence_by_sequence, msms_by_id, raw_sample_map, samples, mqpar, filters):
     annotations_by_key = defaultdict(list)
     for row in annotations:
         annotations_by_key[annotation_join_key(row)].append(row)
@@ -319,7 +430,7 @@ def build_variant_rows(events, annotations, mapping, evidence_by_sequence, msms_
         all_peptides = {(row.get("Sequence") or "").upper() for row in event_annotations if row.get("Sequence")}
         altered_rows = [
             row for row in event_annotations
-            if row.get("Peptide spans VEP protein position") == "yes" and row.get("Sequence")
+            if row.get("Validation status", "").startswith("VALIDATED_") and row.get("Sequence")
         ]
         altered_peptides = {(row.get("Sequence") or "").upper() for row in altered_rows}
 
@@ -347,7 +458,8 @@ def build_variant_rows(events, annotations, mapping, evidence_by_sequence, msms_
             if passes_user_filters(row, mapping.get((row.get("Sequence") or "").upper(), {}), filters)
         }
 
-        evidence = evidence_summary(altered_peptides, evidence_by_sequence, msms_by_id)
+        evidence = evidence_summary(altered_peptides, evidence_by_sequence, msms_by_id, raw_sample_map)
+        classification = evidence_classes({sample}, split_ids(evidence["Direct MS/MS samples"]), split_ids(evidence["MBR-only samples"]))
         meta = samples.get(sample, {})
         output.append({
             "Sample": sample,
@@ -373,6 +485,7 @@ def build_variant_rows(events, annotations, mapping, evidence_by_sequence, msms_
             "Canonical-and-reference-absent peptides": sorted_join(canonical_and_reference_absent),
             "User-filtered altered-residue peptides": sorted_join(user_filtered_peptides),
             **evidence,
+            **classification,
             "Evidence category": (
                 "altered-residue association" if altered_peptides
                 else "variant-protein peptide not spanning altered residue" if all_peptides
@@ -386,7 +499,7 @@ def build_variant_rows(events, annotations, mapping, evidence_by_sequence, msms_
     return output
 
 
-def build_junction_rows(splice_rows, evidence_by_sequence, msms_by_id, samples):
+def build_junction_rows(splice_rows, evidence_by_sequence, msms_by_id, raw_sample_map, samples):
     grouped = defaultdict(list)
     for row in splice_rows:
         if row.get("Peptide classification") != "exact-junction-spanning":
@@ -405,7 +518,8 @@ def build_junction_rows(splice_rows, evidence_by_sequence, msms_by_id, samples):
     for key, rows in grouped.items():
         sequence, junction, reference_status, support, left, right = key
         source_samples = {row.get("Sample", "") for row in rows if row.get("Sample")}
-        evidence = evidence_summary({sequence}, evidence_by_sequence, msms_by_id)
+        evidence = evidence_summary({sequence}, evidence_by_sequence, msms_by_id, raw_sample_map)
+        classification = evidence_classes(source_samples, split_ids(evidence["Direct MS/MS samples"]), split_ids(evidence["MBR-only samples"]))
         output.append({
             "Sequence": sequence,
             "RNA source samples": sorted_join(source_samples),
@@ -414,14 +528,79 @@ def build_junction_rows(splice_rows, evidence_by_sequence, msms_by_id, samples):
             "Reference status": reference_status,
             "Support": support,
             "Anchors": f"{left}+{right}",
-            "MS detection samples": evidence["MS detection samples"],
+            "MS detection samples": evidence["Direct MS/MS samples"],
+            "Direct MS/MS samples": evidence["Direct MS/MS samples"],
+            "MBR-only samples": evidence["MBR-only samples"],
+            "Any evidence samples": evidence["Any evidence samples"],
             "Raw files": evidence["Raw files"],
+            "Direct MS/MS raw files": evidence["Direct MS/MS raw files"],
+            "MBR-only raw files": evidence["MBR-only raw files"],
             "Best PEP": evidence["Best PEP"],
             "Best score": evidence["Best score"],
             "PSM count": evidence["PSM count"],
+            **classification,
         })
     output.sort(key=lambda row: (row["Reference status"], row["Sequence"], row["Genomic junction"]))
     return output
+
+
+def merge_semicolon_fields(rows, field):
+    values = set()
+    for row in rows:
+        values.update(split_ids(row.get(field, "")))
+    return ";".join(sorted(values))
+
+
+def build_unique_variant_rows(variant_rows, samples):
+    grouped = defaultdict(list)
+    for row in variant_rows:
+        peptides = row.get("Altered-residue peptides", "")
+        if not peptides:
+            continue
+        key = (
+            normalize_chromosome(row.get("Chromosome")),
+            str(row.get("Position") or ""),
+            row.get("REF") or "",
+            row.get("ALT") or "",
+            peptides,
+        )
+        grouped[key].append(row)
+
+    merged = []
+    merge_fields = [
+        "Genes", "Gene IDs", "Transcripts", "Protein IDs", "Consequences", "IMPACT",
+        "HGVSc", "HGVSp", "All mapped variant-protein peptides", "Altered-residue peptides",
+        "Search-consistent altered-residue peptides", "Canonical-absent altered-residue peptides",
+        "Ensembl-reference-absent altered-residue peptides", "Canonical-and-reference-absent peptides",
+        "User-filtered altered-residue peptides", "Direct MS/MS samples", "MBR-only samples",
+        "Any evidence samples", "Raw files", "Direct MS/MS raw files", "MBR-only raw files",
+        "Experiments", "Evidence IDs", "MS/MS IDs", "Scan numbers", "VEP VCF",
+    ]
+    for (chrom, pos, ref, alt, _peptides), rows in grouped.items():
+        rna_samples = sorted({row.get("Sample", "") for row in rows if row.get("Sample")})
+        base = dict(rows[0])
+        base.pop("Sample", None)
+        base.pop("SRA", None)
+        base["RNA source samples"] = ";".join(rna_samples)
+        base["RNA source SRAs"] = sorted_join(samples.get(sample, {}).get("srr", "") for sample in rna_samples)
+        base["RNA source sample count"] = str(len(rna_samples))
+        base["Variant"] = f"{chrom}:{pos}:{ref}>{alt}"
+        for field in merge_fields:
+            base[field] = merge_semicolon_fields(rows, field)
+        direct_raw = set(split_ids(base.get("Direct MS/MS raw files")))
+        mbr_raw = set(split_ids(base.get("MBR-only raw files")))
+        base["Direct MS/MS replicate total"] = str(len(direct_raw))
+        base["MBR-only replicate total"] = str(len(mbr_raw))
+        base["Any evidence replicate total"] = str(len(direct_raw | mbr_raw))
+        base["PSM count"] = str(len(set(split_ids(base.get("MS/MS IDs")))))
+        peps = [safe_float(row.get("Best PEP"), 1.0) for row in rows if row.get("Best PEP")]
+        scores = [safe_float(row.get("Best score"), 0.0) for row in rows if row.get("Best score")]
+        base["Best PEP"] = f"{min(peps):.6g}" if peps else ""
+        base["Best score"] = f"{max(scores):.6g}" if scores else ""
+        merged.append(base)
+    chrom_key = lambda value: (0, int(value)) if str(value).isdigit() else (1, str(value))
+    merged.sort(key=lambda row: (chrom_key(row["Chromosome"]), int(row["Position"]), row["REF"], row["ALT"], row["Altered-residue peptides"]))
+    return merged
 
 
 def md_escape(value):
@@ -517,7 +696,8 @@ def write_markdown(path, variant_rows, junction_rows, mqpar, samples, fasta_stat
         handle.write(f"- Peptide FDR: `{md_escape(mqpar['peptide_fdr'])}` (mqpar.xml; not converted into a PEP cutoff)\n")
         handle.write(f"- Protein FDR: `{md_escape(mqpar['protein_fdr'])}` (mqpar.xml)\n")
         handle.write(f"- Contaminants enabled: `{md_escape(mqpar['include_contaminants'])}` (mqpar.xml)\n")
-        handle.write(f"- Match between runs: `{md_escape(mqpar['match_between_runs'])}` (mqpar.xml)\n\n")
+        handle.write(f"- Match between runs: `{md_escape(mqpar['match_between_runs'])}` (mqpar.xml)\n")
+        handle.write(f"- Raw-file mapping mode: `{'explicit' if filters.get('raw_file_map_used') else 'default sample-ID search'}`\n\n")
         for fasta in mqpar["fasta_paths"]:
             handle.write(f"- `{md_escape(fasta)}`: {md_escape(fasta_status.get(fasta, 'historical path unavailable'))}\n")
 
@@ -541,6 +721,7 @@ def main():
     parser.add_argument("--splice-validation", required=True)
     parser.add_argument("--searched-fasta", nargs="*", default=[])
     parser.add_argument("--output-prefix", default="proteogenomics_evidence")
+    parser.add_argument("--raw-file-map", help="Optional TSV/CSV with raw_file and sample columns")
     parser.add_argument("--user-max-pep", type=float)
     parser.add_argument("--user-min-score", type=float)
     parser.add_argument("--user-min-msms-count", type=int)
@@ -555,9 +736,14 @@ def main():
     mqpar = parse_mqpar(args.mqpar)
     mapping = load_mapping(args.peptide_mapping)
     evidence_by_sequence = load_evidence(args.evidence)
+    explicit_raw_map = load_raw_file_map(args.raw_file_map, set(samples))
+    raw_sample_map = resolve_raw_file_samples(evidence_by_sequence, set(samples), explicit_raw_map)
     msms_by_id = load_msms(args.msms)
     validate_protein_groups(args.protein_groups)
-    events = parse_vep_vcfs(args.vep_vcf)
+    events = parse_vep_vcfs(
+        args.vep_vcf,
+        set(samples),
+    )
     annotations = read_tsv(args.variant_annotation)
     splice_rows = read_tsv(args.splice_validation)
 
@@ -572,9 +758,10 @@ def main():
         "exclude_decoy_matches": args.user_exclude_decoy_matches,
     }
     filters["enabled"] = any(value is not None and value is not False for value in filters.values())
+    filters["raw_file_map_used"] = bool(args.raw_file_map)
 
-    variant_rows = build_variant_rows(events, annotations, mapping, evidence_by_sequence, msms_by_id, samples, mqpar, filters)
-    junction_rows = build_junction_rows(splice_rows, evidence_by_sequence, msms_by_id, samples)
+    variant_rows = build_variant_rows(events, annotations, mapping, evidence_by_sequence, msms_by_id, raw_sample_map, samples, mqpar, filters)
+    junction_rows = build_junction_rows(splice_rows, evidence_by_sequence, msms_by_id, raw_sample_map, samples)
 
     variant_fields = [
         "Sample", "SRA", "Variant", "Chromosome", "Position", "REF", "ALT", "Genes", "Gene IDs",
@@ -582,22 +769,81 @@ def main():
         "All mapped variant-protein peptides", "Altered-residue peptides", "Search-consistent altered-residue peptides",
         "Canonical-absent altered-residue peptides", "Ensembl-reference-absent altered-residue peptides",
         "Canonical-and-reference-absent peptides", "User-filtered altered-residue peptides",
-        "MS evidence", "MS detection samples", "Raw files", "Experiments", "Evidence IDs", "MS/MS IDs",
+        "MS evidence", "MS detection samples", "Direct MS/MS samples", "MBR-only samples", "Any evidence samples",
+        "Evidence classifications", "Sample-matched direct MS/MS samples", "Cross-sample direct MS/MS samples",
+        "Sample-matched MBR-only samples", "Cross-sample MBR-only samples", "Primary sample-specific evidence", "Raw files", "Direct MS/MS raw files", "MBR-only raw files", "Direct MS/MS replicate counts", "MBR-only replicate counts", "Any evidence replicate counts", "Direct MS/MS replicate total", "MBR-only replicate total", "Any evidence replicate total", "Experiments", "Evidence IDs", "MS/MS IDs",
         "Scan numbers", "Best PEP", "Best score", "PSM count", "Contaminant evidence", "Evidence category", "VEP VCF",
     ]
     junction_fields = [
         "Sequence", "RNA source samples", "RNA source SRAs", "Genomic junction", "Reference status",
-        "Support", "Anchors", "MS detection samples", "Raw files", "Best PEP", "Best score", "PSM count",
+        "Support", "Anchors", "MS detection samples", "Direct MS/MS samples", "MBR-only samples", "Any evidence samples",
+        "Evidence classifications", "Sample-matched direct MS/MS samples", "Cross-sample direct MS/MS samples",
+        "Sample-matched MBR-only samples", "Cross-sample MBR-only samples", "Primary sample-specific evidence", "Raw files", "Direct MS/MS raw files", "MBR-only raw files", "Best PEP", "Best score", "PSM count",
     ]
+
+    unique_variant_fields = [
+        "RNA source samples", "RNA source SRAs", "RNA source sample count",
+        *[field for field in variant_fields if field not in {"Sample", "SRA"}],
+    ]
+    unique_variant_rows = build_unique_variant_rows(variant_rows, samples)
 
     prefix = Path(args.output_prefix)
     variants_path = Path(f"{prefix}.variants.tsv")
     junctions_path = Path(f"{prefix}.junctions.tsv")
     report_path = Path(f"{prefix}.report.md")
     summary_path = Path(f"{prefix}.summary.txt")
+    raw_mapping_path = Path(f"{prefix}.raw_file_mapping.tsv")
+    audit_path = Path(f"{prefix}.audit.tsv")
+    rejected_path = Path(f"{prefix}.rejected_associations.tsv")
+    failure_report_path = Path(f"{prefix}.validation_failures.md")
+    unique_variants_path = Path(f"{prefix}.unique_variants.tsv")
+    unique_junctions_path = Path(f"{prefix}.unique_junctions.tsv")
+    unique_direct_variants_path = Path(f"{prefix}.unique_direct_msms_variants.tsv")
+    unique_mbr_variants_path = Path(f"{prefix}.unique_mbr_only_variants.tsv")
+    classification_report_path = Path(f"{prefix}.evidence_classification.md")
 
+    mapping_rows = [
+        {"Raw file": raw, "Sample": sample, "Mapping mode": "explicit" if args.raw_file_map else "default sample-ID search"}
+        for raw, sample in sorted(raw_sample_map.items())
+    ]
+    write_tsv(raw_mapping_path, mapping_rows, ["Raw file", "Sample", "Mapping mode"])
+    annotation_fields = list(annotations[0]) if annotations else ["Sequence", "Validation status", "Validation reason"]
+    write_tsv(audit_path, annotations, annotation_fields)
+    write_tsv(rejected_path, [row for row in annotations if not row.get("Validation status", "").startswith("VALIDATED_")], annotation_fields)
+    rejected_annotations = [row for row in annotations if not row.get("Validation status", "").startswith("VALIDATED_")]
+    with failure_report_path.open("w", encoding="utf-8") as handle:
+        handle.write("# Proteogenomic validation failures\n\n")
+        handle.write("Every initial peptide-event association that failed sequence-level validation is retained below. Failed associations are excluded from validated evidence tables.\n\n")
+        columns = ["Initial finding", "Validation rule", "Observed evidence", "Failure code", "Validation reason", "Required resolution"]
+        handle.write("| " + " | ".join(columns) + " |\n|" + "---|" * len(columns) + "\n")
+        for row in rejected_annotations:
+            values = [str(row.get(column, "")).replace("|", "\\|").replace("\n", " ") for column in columns]
+            handle.write("| " + " | ".join(values) + " |\n")
     write_tsv(variants_path, variant_rows, variant_fields)
     write_tsv(junctions_path, junction_rows, junction_fields)
+    write_tsv(unique_variants_path, unique_variant_rows, unique_variant_fields)
+    write_tsv(unique_junctions_path, junction_rows, junction_fields)
+    write_tsv(unique_direct_variants_path, [row for row in unique_variant_rows if row.get("Direct MS/MS samples")], unique_variant_fields)
+    write_tsv(unique_mbr_variants_path, [row for row in unique_variant_rows if row.get("MBR-only samples")], unique_variant_fields)
+    write_tsv(Path(f"{prefix}.direct_msms_variants.tsv"), [r for r in variant_rows if r.get("Direct MS/MS samples")], variant_fields)
+    write_tsv(Path(f"{prefix}.mbr_only_variants.tsv"), [r for r in variant_rows if r.get("MBR-only samples")], variant_fields)
+    write_tsv(Path(f"{prefix}.direct_msms_junctions.tsv"), [r for r in junction_rows if r.get("Direct MS/MS samples")], junction_fields)
+    write_tsv(Path(f"{prefix}.mbr_only_junctions.tsv"), [r for r in junction_rows if r.get("MBR-only samples")], junction_fields)
+    classifications = {
+        "sample_matched_direct_msms":"SAMPLE_MATCHED_DIRECT_MSMS",
+        "cross_sample_direct_msms":"CROSS_SAMPLE_DIRECT_MSMS",
+        "sample_matched_mbr_only":"SAMPLE_MATCHED_MBR_ONLY",
+        "cross_sample_mbr_only":"CROSS_SAMPLE_MBR_ONLY",
+    }
+    for suffix,label in classifications.items():
+        write_tsv(Path(f"{prefix}.{suffix}_variants.tsv"), [r for r in variant_rows if label in split_ids(r.get("Evidence classifications", ""))], variant_fields)
+        write_tsv(Path(f"{prefix}.{suffix}_junctions.tsv"), [r for r in junction_rows if label in split_ids(r.get("Evidence classifications", ""))], junction_fields)
+    with classification_report_path.open("w", encoding="utf-8") as handle:
+        handle.write("# Sample-matched and cross-sample proteogenomic evidence\n\n")
+        handle.write("Only SAMPLE_MATCHED_DIRECT_MSMS is primary sample-specific evidence. Cross-sample and MBR-only observations remain visible but are non-confirmatory for the RNA source sample.\n\n")
+        handle.write("| Evidence class | Variant events | Junction findings |\n|---|---:|---:|\n")
+        for label in classifications.values():
+            handle.write(f"| {label} | {sum(label in split_ids(r.get('Evidence classifications','')) for r in variant_rows)} | {sum(label in split_ids(r.get('Evidence classifications','')) for r in junction_rows)} |\n")
 
     supplied = {str(Path(path).resolve()): path for path in args.searched_fasta}
     fasta_status = {}
@@ -635,11 +881,20 @@ def main():
         handle.write(f"User-filtered variant events: {len(user_events) if filters['enabled'] else 'disabled'}\n")
         handle.write(f"Unique translated junction-spanning peptides: {len({row['Sequence'] for row in junction_rows})}\n")
         handle.write(f"Reference-absent translated junctions: {len(novel_junctions)}\n")
+        handle.write(f"Unique variant-peptide associations: {len(unique_variant_rows)}\n")
+        handle.write(f"Unique variant-peptide associations with direct MS/MS samples: {sum(bool(r.get('Direct MS/MS samples')) for r in unique_variant_rows)}\n")
+        handle.write(f"Unique variant-peptide associations with MBR-only samples: {sum(bool(r.get('MBR-only samples')) for r in unique_variant_rows)}\n")
         handle.write(f"MaxQuant minimum peptide length: {mqpar['min_peptide_length']}\n")
         handle.write(f"MaxQuant version: {mqpar['version']}\n")
         handle.write(f"Match between runs: {mqpar['match_between_runs']}\n")
+        handle.write(f"Raw-file mapping mode: {'explicit' if args.raw_file_map else 'default sample-ID search'}\n")
+        handle.write(f"Resolved MaxQuant raw files: {len(raw_sample_map)}\n")
+        handle.write(f"Variant events with direct MS/MS samples: {sum(bool(r.get('Direct MS/MS samples')) for r in variant_rows)}\n")
+        handle.write(f"Variant events with MBR-only samples: {sum(bool(r.get('MBR-only samples')) for r in variant_rows)}\n")
+        handle.write(f"Junction findings with direct MS/MS samples: {sum(bool(r.get('Direct MS/MS samples')) for r in junction_rows)}\n")
+        handle.write(f"Junction findings with MBR-only samples: {sum(bool(r.get('MBR-only samples')) for r in junction_rows)}\n")
 
-    for output in (variants_path, junctions_path, report_path, summary_path):
+    for output in (variants_path, junctions_path, unique_variants_path, unique_junctions_path, unique_direct_variants_path, unique_mbr_variants_path, audit_path, rejected_path, failure_report_path, raw_mapping_path, classification_report_path, report_path, summary_path):
         print(f"Wrote {output}")
 
 

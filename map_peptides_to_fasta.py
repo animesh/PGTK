@@ -1,4 +1,3 @@
-#python map_peptides_to_fasta.py --peptides ./ftp.pride.ebi.ac.uk/pride/data/archive/2024/11/PXD033510/combined/txt/peptides.txt --fasta /cluster/home/ash022/FastaDB/uniprotkb_proteome_UP000005640_2026_06_25.fasta ./results/combined_fasta/TK12.exploratory_proteogenomics.fasta ./results/combined_fasta/TK13.exploratory_proteogenomics.fasta ./results/combined_fasta/TK14.exploratory_proteogenomics.fasta   --group-map 2=TK12   --group-map 3=TK13    --group-map 4=TK14  --output-prefix peptide_fasta_mapping
 
 import argparse
 import csv
@@ -66,7 +65,7 @@ def classify_header(header):
 
 
 def sample_from_header(header):
-    match = re.match(r"^(TK\d+)\|", header, flags=re.IGNORECASE)
+    match = re.match(r"^([^|]+)\|", header)
     return match.group(1).upper() if match else ""
 
 
@@ -189,7 +188,7 @@ def main():
     parser.add_argument("--peptides", required=True, help="MaxQuant peptides.txt")
     parser.add_argument("--fasta", nargs="+", required=True, help="FASTA files and/or directories")
     parser.add_argument("--output-prefix", default="peptide_fasta_mapping", help="Output prefix")
-    parser.add_argument("--group-map", action="append", default=[], metavar="PREFIX=SAMPLE", help="Map MaxQuant experiment prefix to biological sample, e.g. 2=TK12")
+    parser.add_argument("--group-map", action="append", default=[], metavar="PREFIX=SAMPLE", help="Map MaxQuant experiment prefix to biological sample, e.g. runA=sampleA")
     parser.add_argument("--min-length", type=int, default=7)
     parser.add_argument("--exact-il", action="store_true", help="Treat I and L as distinct. Default treats them as mass-spectrometry equivalent.")
     parser.add_argument("--max-headers", type=int, default=0, help="Maximum headers stored per peptide; 0 means all")

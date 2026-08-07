@@ -1,5 +1,3 @@
-#python validate_splice_junction_peptides.py  --candidates junction_peptide_analysis.splice_candidates.tsv  --splice-fasta  results/splice_fasta/TK12.splice_proteins.fasta  results/splice_fasta/TK13.splice_proteins.fasta  results/splice_fasta/TK14.splice_proteins.fasta  --transcript-gtf  results/splicing/stringtie/TK12.assembled.gtf  results/splicing/stringtie/TK13.assembled.gtf  results/splicing/stringtie/TK14.assembled.gtf  --reference-gtf  reference_downloads/Homo_sapiens.GRCh38.111.gtf.gz  --output-prefix validated_splice_junctions_v3
-#tar cvzf validated_splice_junctions_v3_results.zip.txt  validated_splice_junctions_v3.summary.txt   validated_splice_junctions_v3.prioritized_novel_junctions.tsv   validated_splice_junctions_v3.junction_spanning.tsv   validated_splice_junctions_v3.detailed.tsv   validated_splice_junctions_v3.unresolved.tsv
 import argparse
 import csv
 import gzip
@@ -7,8 +5,6 @@ import re
 import sys
 from collections import defaultdict
 from pathlib import Path
-
-SAMPLE_RE = re.compile(r"(TK12|TK13|TK14)", re.IGNORECASE)
 
 
 def open_text(path):
@@ -26,10 +22,10 @@ def normalize_sequence(sequence, il_equivalent=True):
 
 
 def sample_from_path(path):
-    match = SAMPLE_RE.search(Path(path).name)
-    if not match:
-        raise ValueError(f"Cannot determine TK sample from GTF filename: {path}")
-    return match.group(1).upper()
+    sample = Path(path).name.split(".", 1)[0].strip()
+    if not sample:
+        raise ValueError(f"Cannot determine sample from GTF filename: {path}")
+    return sample
 
 
 def parse_gtf_attributes(text):
@@ -262,16 +258,31 @@ def genomic_junction_coordinates(record, left_exon, right_exon):
     return right_exon["g_end"], left_exon["g_start"]
 
 
+def _all_positions(sequence, peptide):
+    positions = []
+    offset = 0
+    while peptide:
+        position = sequence.find(peptide, offset)
+        if position < 0:
+            break
+        positions.append(position)
+        offset = position + 1
+    return positions
+
+
 def find_peptide(sequence, peptide, il_equivalent):
-    position = sequence.find(peptide)
-    if position >= 0:
-        return position, "exact"
-    if il_equivalent:
-        position = normalize_sequence(sequence, True).find(
-            normalize_sequence(peptide, True)
+    positions = _all_positions(sequence, peptide)
+    mode = "exact"
+    if not positions and il_equivalent:
+        positions = _all_positions(
+            normalize_sequence(sequence, True),
+            normalize_sequence(peptide, True),
         )
-        if position >= 0:
-            return position, "I/L-equivalent"
+        mode = "I/L-equivalent"
+    if len(positions) == 1:
+        return positions[0], mode
+    if len(positions) > 1:
+        return -2, "ambiguous-multiple-occurrences"
     return -1, "not-found"
 
 
@@ -286,6 +297,8 @@ def analyze_protein(
     position, match_mode = find_peptide(
         protein["sequence"], peptide, il_equivalent
     )
+    if position == -2:
+        return [], "peptide has multiple occurrences in splice protein"
     if position < 0:
         return [], "peptide not found in splice protein"
     if transcript_record is None:

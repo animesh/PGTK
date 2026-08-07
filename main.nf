@@ -4,8 +4,7 @@ nextflow.enable.dsl=2
 params.samplesheet = "${projectDir}/samples.csv"
 params.outdir = "${projectDir}/results"
 params.read_length = 150
-params.skip_trimming = false
-params.sra_dir = "${projectDir}/sra_cache"
+params.sra_dir = null
 params.fusion_flank_aa = 50
 params.splice_min_coverage = 2.5
 params.splice_min_junction_reads = 3
@@ -13,15 +12,116 @@ params.splice_min_isoform_fraction = 0.05
 params.splice_min_protein_aa = 60
 params.splice_class_codes = 'j,u'
 params.run_proteogenomic_validation = false
-params.maxquant_txt = null
+params.maxquant_txt = "${projectDir}/txtMQMBR"
 params.maxquant_mqpar = null
 params.maxquant_canonical_fasta = null
-params.maxquant_contaminants = '/cluster/home/ash022/scripts/MaxQuant_v2.8.1.0/bin/conf/contaminants.fasta'
-params.ensembl_pep = "${projectDir}/reference_downloads/Homo_sapiens.GRCh38.pep.all.fa.gz"
+params.maxquant_contaminants = null
+params.maxquant_raw_map = null
+params.ensembl_pep = null
+params.read_validation_padding = 150
+params.rna_variant_min_depth = 10
+params.rna_variant_min_alt_reads = 3
+params.rna_variant_min_alt_fraction = 0.05
+params.rna_fusion_min_split_reads = 1
+params.rna_fusion_min_total_support = 2
+params.haplotype_scatter_count = 24
+params.hc_calling_confidence = 20
+params.hc_dont_use_soft_clipped_bases = true
+params.hc_pcr_indel_model = 'CONSERVATIVE'
+params.run_external_vcf_comparison = false
+params.external_vcf_dir = "${projectDir}/sarek"
+params.external_vcf_suffix = '.haplotypecaller.vcf.gz'
+params.host_python = null
+params.reference_downloads = null
+params.container_cache = null
+
+
+def resolveExternalVcf(String directory, String srr, String suffix) {
+    def root = new File(directory)
+    if (!root.isDirectory()) error "External caller folder not found: ${directory}"
+    def expected = "${srr}${suffix}"
+    def matches = []
+    root.eachFileRecurse { f -> if (f.isFile() && f.name == expected) matches << f }
+    if (matches.size() != 1) error "Expected exactly one ${expected} below ${directory}; found ${matches.size()}"
+    return file(matches[0].toString(), checkIfExists:true)
+}
+
+def resolveContaminants(String configured, String maxquantTxt) {
+    if (configured) return file(configured, checkIfExists:true)
+    def roots = [new File(maxquantTxt), new File(maxquantTxt).parentFile, new File(projectDir.toString())].findAll { it?.isDirectory() }
+    def matches=[]
+    roots.each { root -> root.eachFileRecurse { f -> if (f.isFile() && f.name.toLowerCase() in ['contaminants.fasta','contaminants.fa']) matches << f } }
+    def homeCandidate = new File(System.getProperty('user.home'), 'scripts/MaxQuant_v2.8.1.0/bin/conf/contaminants.fasta')
+    if (homeCandidate.isFile()) matches << homeCandidate
+    matches=matches.unique { it.canonicalPath }
+    if (matches.size()!=1) error "Set --maxquant_contaminants or place exactly one contaminants.fasta under txtMQMBR, its parent, or projectDir; found ${matches.size()}"
+    return file(matches[0].toString(), checkIfExists:true)
+}
+
+def resolveMaxQuantMqpar(maxquant_txt, override_path) {
+    if (override_path) return file(override_path, checkIfExists:true)
+    def txt = new File(maxquant_txt.toString())
+    def candidates = [new File(txt, 'mqpar.xml'), new File(txt.parentFile, 'mqpar.xml')]
+    def found = candidates.find { it?.isFile() && it.length() > 0 }
+    if (!found) error "Cannot find mqpar.xml inside --maxquant_txt or its parent; use --maxquant_mqpar to override"
+    return file(found.toString(), checkIfExists:true)
+}
+
+def maxQuantFastaPaths(mqpar_file) {
+    def matcher = mqpar_file.text =~ /(?is)<fastaFilePath>\s*([^<]+?)\s*<\/fastaFilePath>/
+    def paths = matcher.collect { matched ->
+        matched[1].trim()
+    }
+    if (!paths) error "mqpar.xml contains no fastaFilePath entries"
+    return paths
+}
+
+def fastaBasename(path_value) {
+    return path_value.toString().replace('\\', '/').tokenize('/').last()
+}
+
+def resolveExistingFasta(configured_path, mqpar_file, maxquant_txt) {
+    def basename = fastaBasename(configured_path)
+    def txt = new File(maxquant_txt.toString())
+    def home = System.getenv('HOME') ?: ''
+    def candidates = [
+        new File(configured_path.toString()),
+        new File(mqpar_file.parent.toString(), basename),
+        new File(txt, basename),
+        new File(txt.parentFile, basename),
+        new File(projectDir.toString(), basename),
+        home ? new File(home, "FastaDB/${basename}") : null,
+    ].findAll { it != null }
+    def found = candidates.find { it.isFile() && it.length() > 0 }
+    if (!found) error "FASTA '${basename}' from mqpar.xml was not found in the recorded path, beside mqpar.xml, in MQTXT, its parent, projectDir, or ~/FastaDB"
+    return file(found.toString(), checkIfExists:true)
+}
+
+def resolveMaxQuantCanonicalFastas(mqpar_file, maxquant_txt, override_value, sample_fasta_basenames) {
+    if (override_value) {
+        def values = override_value instanceof List ? override_value : override_value.toString().split(',').collect { it.trim() }.findAll { it }
+        return values.collect { file(it, checkIfExists:true) }
+    }
+    def sample_names = sample_fasta_basenames.collect { it.toLowerCase() } as Set
+    def canonical_entries = maxQuantFastaPaths(mqpar_file).findAll { configured ->
+        def basename = fastaBasename(configured)
+        !sample_names.contains(basename.toLowerCase()) && !basename.toLowerCase().contains('contaminant')
+    }
+    if (!canonical_entries) error "No canonical FASTA remains after matching mqpar.xml entries to pipeline-generated sample FASTAs"
+    return canonical_entries.collect { resolveExistingFasta(it, mqpar_file, maxquant_txt) }
+}
 
 process DOWNLOAD_REFERENCES {
     tag 'GRCh38_Ensembl111'
-    cpus 8; memory '32 GB'; time '12h'; disk '100 GB'; queue 'normal'
+    cpus 4; memory '16 GB'; time '12h'; disk '150 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    input:
+    path genome_archive
+    path gtf_archive
+    path cdna_archive
+    path proteome_archive
+    path vep_archive
+    path arriba_archive
     output:
     path 'refs/genome.fa', emit: genome
     path 'refs/genes.gtf', emit: gtf
@@ -35,24 +135,15 @@ process DOWNLOAD_REFERENCES {
     """
     set -euo pipefail
 
-    REFERENCE_DOWNLOADS='${projectDir}/reference_downloads'
-
-    test -s "\${REFERENCE_DOWNLOADS}/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz"
-    test -s "\${REFERENCE_DOWNLOADS}/Homo_sapiens.GRCh38.111.gtf.gz"
-    test -s "\${REFERENCE_DOWNLOADS}/Homo_sapiens.GRCh38.cdna.all.fa.gz"
-    test -s "\${REFERENCE_DOWNLOADS}/human_reviewed_isoforms.fasta.gz"
-    test -s "\${REFERENCE_DOWNLOADS}/homo_sapiens_vep_111_GRCh38.tar.gz"
-    test -s "\${REFERENCE_DOWNLOADS}/arriba_v2.4.0.tar.gz"
-
     mkdir -p refs/vep_cache refs/arriba_unpack
 
-    gzip -dc "\${REFERENCE_DOWNLOADS}/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz" > refs/genome.fa
-    gzip -dc "\${REFERENCE_DOWNLOADS}/Homo_sapiens.GRCh38.111.gtf.gz" > refs/genes.gtf
-    gzip -dc "\${REFERENCE_DOWNLOADS}/Homo_sapiens.GRCh38.cdna.all.fa.gz" > refs/cdna.fa
-    gzip -dc "\${REFERENCE_DOWNLOADS}/human_reviewed_isoforms.fasta.gz" > refs/human_reviewed_isoforms.fasta
+    gzip -dc ${genome_archive} > refs/genome.fa
+    gzip -dc ${gtf_archive} > refs/genes.gtf
+    gzip -dc ${cdna_archive} > refs/cdna.fa
+    gzip -dc ${proteome_archive} > refs/human_reviewed_isoforms.fasta
 
-    tar -xzf "\${REFERENCE_DOWNLOADS}/homo_sapiens_vep_111_GRCh38.tar.gz" -C refs/vep_cache
-    tar -xzf "\${REFERENCE_DOWNLOADS}/arriba_v2.4.0.tar.gz" -C refs/arriba_unpack
+    tar -xzf ${vep_archive} -C refs/vep_cache
+    tar -xzf ${arriba_archive} -C refs/arriba_unpack
 
     cp \$(find refs/arriba_unpack -type f -name 'blacklist_hg38_GRCh38*.tsv.gz' -print -quit) refs/arriba_blacklist.tsv.gz
     cp \$(find refs/arriba_unpack -type f -name 'known_fusions_hg38_GRCh38*.tsv.gz' -print -quit) refs/arriba_known_fusions.tsv.gz
@@ -71,7 +162,7 @@ process DOWNLOAD_REFERENCES {
 
 process SRA_TO_FASTQ {
     tag "${meta.sample}:${srr}"
-    cpus 16; memory '32 GB'; time '24h'; disk '150 GB'; queue 'normal'
+    cpus 12; memory '32 GB'; time '36h'; disk '750 GB'
     container 'quay.io/biocontainers/sra-tools:3.2.1--h4304569_0'
     input: tuple val(meta), val(srr), path(sra_file)
     output: tuple val(meta), path("${srr}_1.fastq.gz"), path("${srr}_2.fastq.gz")
@@ -104,7 +195,7 @@ process SRA_TO_FASTQ {
 
 process CAT_FASTQ {
     tag "${meta.sample}"
-    cpus 2; memory '8 GB'; time '4h'; disk '200 GB'; queue 'normal'
+    cpus 1; memory '4 GB'; time '12h'; disk '1000 GB'
     input: tuple val(meta), path(r1s), path(r2s)
     output: tuple val(meta), path("${meta.sample}_R1.fastq.gz"), path("${meta.sample}_R2.fastq.gz")
     script:
@@ -118,7 +209,7 @@ process CAT_FASTQ {
 
 process FASTQC_RAW {
     tag "${meta.sample}:raw"
-    cpus 8; memory '16 GB'; time '8h'; disk '100 GB'; queue 'normal'
+    cpus 4; memory '12 GB'; time '16h'; disk '500 GB'
     container 'quay.io/biocontainers/fastqc:0.12.1--hdfd78af_0'
     publishDir "${params.outdir}/qc/fastqc_raw", mode:'copy'
     input: tuple val(meta), path(r1), path(r2)
@@ -133,7 +224,7 @@ process FASTQC_RAW {
 
 process TRIM_GALORE {
     tag "${meta.sample}"
-    cpus 8; memory '16 GB'; time '12h'; disk '150 GB'; queue 'normal'
+    cpus 8; memory '24 GB'; time '36h'; disk '750 GB'
     container 'quay.io/biocontainers/trim-galore:0.6.10--hdfd78af_0'
     publishDir "${params.outdir}/qc/trim_galore", mode:'copy', pattern:'*_trimming_report.txt'
     input: tuple val(meta), path(r1), path(r2)
@@ -141,8 +232,9 @@ process TRIM_GALORE {
     tuple val(meta), path("${meta.sample}_R1.trimmed.fastq.gz"), path("${meta.sample}_R2.trimmed.fastq.gz"), emit: reads
     path '*_trimming_report.txt', emit: reports
     script:
+    def trimCores = Math.max(1, task.cpus.intdiv(2))
     """
-    trim_galore --paired --quality 20 --length 36 --cores ${task.cpus} --gzip --basename ${meta.sample} ${r1} ${r2}
+    trim_galore --paired --quality 20 --length 36 --cores ${trimCores} --gzip --basename ${meta.sample} ${r1} ${r2}
     mv ${meta.sample}_val_1.fq.gz ${meta.sample}_R1.trimmed.fastq.gz
     mv ${meta.sample}_val_2.fq.gz ${meta.sample}_R2.trimmed.fastq.gz
     """
@@ -150,7 +242,7 @@ process TRIM_GALORE {
 
 process FASTQC_TRIMMED {
     tag "${meta.sample}:trimmed"
-    cpus 8; memory '16 GB'; time '8h'; disk '100 GB'; queue 'normal'
+    cpus 4; memory '12 GB'; time '16h'; disk '500 GB'
     container 'quay.io/biocontainers/fastqc:0.12.1--hdfd78af_0'
     publishDir "${params.outdir}/qc/fastqc_trimmed", mode:'copy'
     input: tuple val(meta), path(r1), path(r2)
@@ -165,7 +257,7 @@ process FASTQC_TRIMMED {
 
 process STAR_INDEX {
     tag 'GRCh38_Ensembl111'
-    cpus 20; memory '64 GB'; time '12h'; disk '320 GB'; queue 'normal'
+    cpus 16; memory '64 GB'; time '16h'; disk '400 GB'
     container 'quay.io/biocontainers/star:2.7.11b--h43eeafb_1'
     input: path genome; path gtf
     output: path 'star_index'
@@ -178,7 +270,7 @@ process STAR_INDEX {
 
 process STAR_ALIGN {
     tag "${meta.sample}"
-    cpus 32; memory '256 GB'; time '24h'; disk '320 GB'; queue 'bigmem'
+    cpus 20; memory '128 GB'; time '48h'; disk '1000 GB'
     container 'quay.io/biocontainers/star:2.7.11b--h43eeafb_1'
     input: tuple val(meta), path(r1), path(r2); path index
     output:
@@ -218,7 +310,7 @@ process STAR_ALIGN {
 
 process SORT_INDEX_BAM {
     tag "${meta.sample}"
-    cpus 20; memory '64 GB'; time '24h'; disk '200 GB'; queue 'normal'
+    cpus 12; memory '48 GB'; time '36h'; disk '1000 GB'
     container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
     publishDir "${params.outdir}/bam/star", mode:'copy', pattern:'*.Aligned.sortedByCoord.out.bam*'
     input: tuple val(meta), path(bam)
@@ -232,7 +324,7 @@ process SORT_INDEX_BAM {
 
 process SAMTOOLS_FLAGSTAT {
     tag "${meta.sample}"
-    cpus 4; memory '16 GB'; time '4h'; disk '20 GB'; queue 'normal'
+    cpus 4; memory '8 GB'; time '8h'; disk '50 GB'
     container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
     publishDir "${params.outdir}/qc/flagstat", mode:'copy'
     input: tuple val(meta), path(bam), path(bai)
@@ -244,7 +336,7 @@ process SAMTOOLS_FLAGSTAT {
 }
 
 process REF_INDEX {
-    tag 'GRCh38'; cpus 4; memory '16 GB'; time '4h'; disk '30 GB'; queue 'normal'
+    tag 'GRCh38'; cpus 4; memory '16 GB'; time '4h'; disk '30 GB'
     container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
     input: path genome
     output: tuple path('genome.fa'), path('genome.fa.fai'), path('genome.dict')
@@ -260,18 +352,20 @@ process REF_INDEX {
 }
 process MARK_DUPLICATES {
     tag "${meta.sample}"
-    cpus 20; memory '64 GB'; time '24h'; disk '200 GB'; queue 'normal'
+    cpus 2; memory '48 GB'; time '8h'; disk '250 GB'
     container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
     input: tuple val(meta), path(bam), path(bai)
     output:
     tuple val(meta), path("${meta.sample}.markdup.bam"), path("${meta.sample}.markdup.bam.bai"), emit: bam
     path "${meta.sample}.metrics.txt", emit: metrics
     script:
+    def javaHeapGb = Math.max(1, Math.floor(task.memory.toGiga() * 0.80) as int)
+    def javaGcThreads = Math.max(1, Math.min(task.cpus as int, 8))
     """
     set -euo pipefail
     mkdir -p gatk_tmp
     trap 'rm -rf gatk_tmp' EXIT
-    gatk --java-options "-Xms4g -Xmx56g -XX:ParallelGCThreads=20 -Djava.io.tmpdir=\${PWD}/gatk_tmp" \
+    gatk --java-options "-Xms1g -Xmx${javaHeapGb}g -XX:ParallelGCThreads=${javaGcThreads} -Djava.io.tmpdir=\${PWD}/gatk_tmp" \
         MarkDuplicates \
         -I ${bam} \
         -O ${meta.sample}.markdup.bam \
@@ -287,60 +381,187 @@ process MARK_DUPLICATES {
 }
 
 process SPLIT_N_CIGAR {
-    tag "${meta.sample}"; cpus 20; memory '64 GB'; time '24h'; disk '200 GB'; queue 'normal'
+    tag "${meta.sample}"
+    cpus 2; memory '24 GB'; time '16h'; disk '400 GB'
     container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
     input: tuple val(meta), path(bam), path(bai); tuple path(genome), path(fai), path(dict)
     output: tuple val(meta), path("${meta.sample}.split.bam"), path("${meta.sample}.split.bam.bai")
     script:
+    def javaHeapGb = Math.max(1, Math.floor(task.memory.toGiga() * 0.80) as int)
     """
     set -euo pipefail
     mkdir -p gatk_tmp
     trap 'rm -rf gatk_tmp' EXIT
-    df -h .
-    gatk --java-options "-Xms4g -Xmx56g -Djava.io.tmpdir=\${PWD}/gatk_tmp" SplitNCigarReads -R ${genome} -I ${bam} -O ${meta.sample}.split.bam --create-output-bam-index true
+    gatk --java-options "-Xms1g -Xmx${javaHeapGb}g -Djava.io.tmpdir=\${PWD}/gatk_tmp" SplitNCigarReads \
+        -R ${genome} -I ${bam} -O ${meta.sample}.split.bam \
+        --create-output-bam-index true
     if [[ -s ${meta.sample}.split.bai && ! -e ${meta.sample}.split.bam.bai ]]; then
         mv ${meta.sample}.split.bai ${meta.sample}.split.bam.bai
     fi
-    test -s ${meta.sample}.split.bam
     test -s ${meta.sample}.split.bam.bai
     """
 }
 
-process HAPLOTYPE_CALLER {
-    tag "${meta.sample}"; cpus 20; memory '64 GB'; time '48h'; disk '120 GB'; queue 'normal'
+process PREPARE_HAPLOTYPE_INTERVALS {
+    tag "GRCh38:${params.haplotype_scatter_count}_shards"
+    cpus 2; memory '8 GB'; time '4h'; disk '50 GB'
     container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
-    publishDir "${params.outdir}/gvcf", mode:'copy'
-    input: tuple val(meta), path(bam), path(bai); tuple path(genome), path(fai), path(dict)
-    output: tuple val(meta), path("${meta.sample}.g.vcf.gz"), path("${meta.sample}.g.vcf.gz.tbi")
+    input: tuple path(genome), path(fai), path(dict)
+    output: path 'hc_intervals/*.interval_list', emit: intervals
     script:
+    def javaHeapGb = Math.max(1, Math.floor(task.memory.toGiga() * 0.80) as int)
+    """
+    set -euo pipefail
+    mkdir hc_intervals
+    gatk --java-options "-Xms1g -Xmx${javaHeapGb}g" SplitIntervals \
+        -R ${genome} \
+        -O hc_intervals \
+        --scatter-count ${params.haplotype_scatter_count} \
+        --subdivision-mode INTERVAL_SUBDIVISION
+    test "\$(find hc_intervals -name '*.interval_list' -type f | wc -l)" -eq ${params.haplotype_scatter_count}
+    """
+}
+
+process HAPLOTYPE_CALLER {
+    tag "${meta.sample}:${interval.baseName}"
+    cpus 8; memory '20 GB'; time '24h'; disk '150 GB'
+    container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
+    input:
+    tuple val(meta), path(bam), path(bai), path(interval)
+    tuple path(genome), path(fai), path(dict)
+    output:
+    tuple val(meta), val(interval.baseName), path("${meta.sample}.${interval.baseName}.g.vcf.gz"), path("${meta.sample}.${interval.baseName}.g.vcf.gz.tbi")
+    script:
+    def javaHeapGb = Math.max(1, Math.floor(task.memory.toGiga() * 0.80) as int)
+    def softClipArg = params.hc_dont_use_soft_clipped_bases ? '--dont-use-soft-clipped-bases true' : '--dont-use-soft-clipped-bases false'
+    def pcrIndelArg = params.hc_pcr_indel_model ? "--pcr-indel-model ${params.hc_pcr_indel_model}" : ''
     """
     set -euo pipefail
     mkdir -p gatk_tmp
     trap 'rm -rf gatk_tmp' EXIT
-    gatk --java-options "-Xms4g -Xmx56g -Djava.io.tmpdir=\${PWD}/gatk_tmp" HaplotypeCaller -R ${genome} -I ${bam} -O ${meta.sample}.g.vcf.gz -ERC GVCF --dont-use-soft-clipped-bases true --standard-min-confidence-threshold-for-calling 20 --native-pair-hmm-threads ${task.cpus}
+    gatk --java-options "-Xms1g -Xmx${javaHeapGb}g -Djava.io.tmpdir=\${PWD}/gatk_tmp" HaplotypeCaller \
+        -R ${genome} \
+        -I ${bam} \
+        -L ${interval} \
+        -O ${meta.sample}.${interval.baseName}.g.vcf.gz \
+        -ERC GVCF \
+        ${softClipArg} \
+        ${pcrIndelArg} \
+        --standard-min-confidence-threshold-for-calling ${params.hc_calling_confidence} \
+        --native-pair-hmm-threads ${task.cpus}
+    """
+}
+
+process VALIDATE_HAPLOTYPE_SHARDS {
+    tag "${meta.sample}:validate_haplotype_shards"
+    cpus 1; memory '2 GB'; time '2h'; disk '20 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/qc/haplotype_shards", mode:'copy'
+    input:
+    tuple val(meta), path(gvcfs), path(tbis)
+    path validator
+    output:
+    tuple val(meta), path(gvcfs), path(tbis), path("${meta.sample}.haplotype_shards.tsv"), path("${meta.sample}.haplotype_shards.summary.txt")
+    script:
+    """
+    python ${validator} --sample ${meta.sample} --expected ${params.haplotype_scatter_count} --gvcf ${gvcfs} --tbi ${tbis} --output-prefix ${meta.sample}.haplotype_shards
+    """
+}
+
+process GATHER_HAPLOTYPE_GVCF {
+    tag "${meta.sample}:gather_gvcf"
+    cpus 2; memory '8 GB'; time '8h'; disk '200 GB'
+    container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
+    publishDir "${params.outdir}/gvcf", mode:'copy'
+    input:
+    tuple val(meta), path(gvcfs), path(tbis), path(shard_table), path(shard_summary)
+    output:
+    tuple val(meta), path("${meta.sample}.g.vcf.gz"), path("${meta.sample}.g.vcf.gz.tbi")
+    script:
+    def ordered = gvcfs.sort { it.name }
+    def inputs = ordered.collect { "-I ${it}" }.join(' ')
+    def javaHeapGb = Math.max(1, Math.floor(task.memory.toGiga() * 0.80) as int)
+    """
+    set -euo pipefail
+    gatk --java-options "-Xms1g -Xmx${javaHeapGb}g" GatherVcfs \
+        ${inputs} \
+        -O ${meta.sample}.g.vcf.gz \
+        --CREATE_INDEX false
+    gatk --java-options "-Xms1g -Xmx${javaHeapGb}g" IndexFeatureFile \
+        -I ${meta.sample}.g.vcf.gz
+    test -s ${meta.sample}.g.vcf.gz
+    test -s ${meta.sample}.g.vcf.gz.tbi
     """
 }
 
 process GENOTYPE_FILTER {
-    tag "${meta.sample}"; cpus 8; memory '32 GB'; time '12h'; disk '40 GB'; queue 'normal'
+    tag "${meta.sample}"; cpus 1; memory '2 GB'; time '8h'; disk '50 GB'
     container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
+    publishDir "${params.outdir}/vcf_raw", mode:'copy', pattern:'*.raw.vcf.gz*'
+    publishDir "${params.outdir}/vcf_filtered", mode:'copy', pattern:'*.filtered.vcf.gz*'
     publishDir "${params.outdir}/vcf_pass", mode:'copy', pattern:'*.pass.vcf.gz*'
     input: tuple val(meta), path(gvcf), path(tbi); tuple path(genome), path(fai), path(dict)
-    output: tuple val(meta), path("${meta.sample}.pass.vcf.gz"), path("${meta.sample}.pass.vcf.gz.tbi")
+    output:
+    tuple val(meta), path("${meta.sample}.raw.vcf.gz"), path("${meta.sample}.raw.vcf.gz.tbi"), emit: raw
+    tuple val(meta), path("${meta.sample}.filtered.vcf.gz"), path("${meta.sample}.filtered.vcf.gz.tbi"), emit: filtered
+    tuple val(meta), path("${meta.sample}.pass.vcf.gz"), path("${meta.sample}.pass.vcf.gz.tbi"), emit: pass
     script:
+    def javaHeapGb = Math.max(1, Math.floor(task.memory.toGiga() * 0.80) as int)
     """
     set -euo pipefail
     mkdir -p gatk_tmp
     trap 'rm -rf gatk_tmp' EXIT
-    gatk --java-options "-Xms4g -Xmx28g -Djava.io.tmpdir=\${PWD}/gatk_tmp" GenotypeGVCFs -R ${genome} -V ${gvcf} -O ${meta.sample}.raw.vcf.gz
-    gatk --java-options "-Xms4g -Xmx28g -Djava.io.tmpdir=\${PWD}/gatk_tmp" VariantFiltration -R ${genome} -V ${meta.sample}.raw.vcf.gz --window 35 --cluster 3 --filter-expression 'QD < 2.0' --filter-name QD2 --filter-expression 'FS > 30.0' --filter-name FS30 --filter-expression 'MQ < 40.0' --filter-name MQ40 --filter-expression 'MQRankSum < -12.5' --filter-name MQRankSum-12.5 --filter-expression 'ReadPosRankSum < -8.0' --filter-name ReadPos-8 -O ${meta.sample}.filtered.vcf.gz
-    gatk --java-options "-Xms4g -Xmx28g -Djava.io.tmpdir=\${PWD}/gatk_tmp" SelectVariants -R ${genome} -V ${meta.sample}.filtered.vcf.gz --exclude-filtered -O ${meta.sample}.pass.vcf.gz
+    gatk --java-options "-Xms1g -Xmx${javaHeapGb}g -Djava.io.tmpdir=\${PWD}/gatk_tmp" GenotypeGVCFs -R ${genome} -V ${gvcf} -O ${meta.sample}.raw.vcf.gz
+    test -s ${meta.sample}.raw.vcf.gz.tbi || gatk IndexFeatureFile -I ${meta.sample}.raw.vcf.gz
+    gatk --java-options "-Xms1g -Xmx${javaHeapGb}g -Djava.io.tmpdir=\${PWD}/gatk_tmp" VariantFiltration -R ${genome} -V ${meta.sample}.raw.vcf.gz --window 35 --cluster 3 --filter-expression 'QD < 2.0' --filter-name QD2 --filter-expression 'FS > 30.0' --filter-name FS30 --filter-expression 'MQ < 40.0' --filter-name MQ40 --filter-expression 'MQRankSum < -12.5' --filter-name MQRankSum-12.5 --filter-expression 'ReadPosRankSum < -8.0' --filter-name ReadPos-8 -O ${meta.sample}.filtered.vcf.gz
+    test -s ${meta.sample}.filtered.vcf.gz.tbi || gatk IndexFeatureFile -I ${meta.sample}.filtered.vcf.gz
+    gatk --java-options "-Xms1g -Xmx${javaHeapGb}g -Djava.io.tmpdir=\${PWD}/gatk_tmp" SelectVariants -R ${genome} -V ${meta.sample}.filtered.vcf.gz --exclude-filtered -O ${meta.sample}.pass.vcf.gz
+    test -s ${meta.sample}.pass.vcf.gz.tbi || gatk IndexFeatureFile -I ${meta.sample}.pass.vcf.gz
+    """
+}
+
+process VARIANT_STAGE_QC {
+    tag "${meta.sample}:variant_stage_qc"
+    cpus 1; memory '2 GB'; time '2h'; disk '20 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/qc/variant_stages", mode:'copy'
+    input:
+    tuple val(meta), path(raw_vcf), path(raw_tbi), path(pass_vcf), path(pass_tbi), path(rna_vcf), path(rna_tbi)
+    path genome
+    path summarizer
+    output:
+    path "${meta.sample}.variant_stages.tsv", emit: table
+    path "${meta.sample}.variant_stages.report.md", emit: report
+    path "${meta.sample}.variant_stages.provenance.tsv", emit: provenance
+    script:
+    """
+    python ${summarizer} --sample ${meta.sample} --raw ${raw_vcf} --pass-vcf ${pass_vcf} --rna ${rna_vcf} --genome ${genome} --calling-confidence ${params.hc_calling_confidence} --soft-clipped-setting ${params.hc_dont_use_soft_clipped_bases} --pcr-indel-model ${params.hc_pcr_indel_model} --output-prefix ${meta.sample}.variant_stages
+    """
+}
+
+process COMPARE_EXTERNAL_VCF {
+    tag "${meta.sample}:external_vcf_comparison"
+    cpus 1; memory '4 GB'; time '4h'; disk '30 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/comparison/external_vcf", mode:'copy'
+    input:
+    tuple val(meta), path(pgtk_vcf), path(pgtk_tbi), path(external_vcf)
+    path script_file
+    output:
+    path "${meta.sample}.external_comparison.summary.tsv", emit: summary
+    path "${meta.sample}.external_comparison.shared.tsv", emit: shared
+    path "${meta.sample}.external_comparison.pgtk_only.tsv", emit: pgtk_only
+    path "${meta.sample}.external_comparison.external_only.tsv", emit: external_only
+    path "${meta.sample}.external_comparison.report.md", emit: report
+    script:
+    """
+    python ${script_file} --sample ${meta.sample} --pgtk ${pgtk_vcf} --external ${external_vcf} --output-prefix ${meta.sample}.external_comparison
     """
 }
 
 process BCFTOOLS_STATS {
     tag "${meta.sample}"
-    cpus 2; memory '8 GB'; time '4h'; disk '20 GB'; queue 'normal'
+    cpus 2; memory '4 GB'; time '8h'; disk '50 GB'
     container 'quay.io/biocontainers/bcftools:1.21--h8b25389_0'
     publishDir "${params.outdir}/qc/bcftools", mode:'copy'
     input: tuple val(meta), path(vcf), path(tbi)
@@ -352,7 +573,7 @@ process BCFTOOLS_STATS {
 }
 
 process VEP_ANNOTATE {
-    tag "${meta.sample}"; cpus 20; memory '64 GB'; time '24h'; disk '60 GB'; queue 'normal'
+    tag "${meta.sample}"; cpus 12; memory '8 GB'; time '24h'; disk '100 GB'
     container 'quay.io/biocontainers/ensembl-vep:111.0--pl5321h2a3209d_0'
     publishDir "${params.outdir}/vep", mode:'copy'
     input: tuple val(meta), path(vcf), path(tbi); tuple path(genome), path(fai), path(dict); path cache
@@ -364,8 +585,192 @@ process VEP_ANNOTATE {
     """
 }
 
+process VALIDATE_RNA_VARIANTS {
+    tag "${meta.sample}"
+    cpus 1; memory '4 GB'; time '16h'; disk '100 GB'
+    container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
+    publishDir "${params.outdir}/rna_validation/variants", mode:'copy'
+    input:
+    tuple val(meta), path(vcf), path(tbi)
+    path genome
+    path validator
+    output:
+    tuple val(meta), path("${meta.sample}.rna.validated.vcf.gz"), path("${meta.sample}.rna.validated.vcf.gz.tbi"), emit: validated
+    tuple val(meta), path("${meta.sample}.rna.audit.tsv"), emit: audit
+    tuple val(meta), path("${meta.sample}.rna.rejected.tsv"), emit: rejected
+    script:
+    """
+    set -euo pipefail
+    ${params.host_python} ${validator} variant \\
+        --input ${vcf} --genome ${genome} --sample ${meta.sample} \\
+        --min-depth ${params.rna_variant_min_depth} \\
+        --min-alt-reads ${params.rna_variant_min_alt_reads} \\
+        --min-alt-fraction ${params.rna_variant_min_alt_fraction} \\
+        --output-prefix ${meta.sample}.rna
+    mv ${meta.sample}.rna.validated.vcf.gz ${meta.sample}.rna.validated.tmp.vcf.gz
+    gzip -dc ${meta.sample}.rna.validated.tmp.vcf.gz | bgzip -c > ${meta.sample}.rna.validated.vcf.gz
+    tabix -f -p vcf ${meta.sample}.rna.validated.vcf.gz
+    rm ${meta.sample}.rna.validated.tmp.vcf.gz
+    """
+}
+
+process VALIDATE_RNA_FUSIONS {
+    tag "${meta.sample}"
+    cpus 1; memory '4 GB'; time '8h'; disk '50 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/rna_validation/fusions", mode:'copy'
+    input:
+    tuple val(meta), path(fusions)
+    path validator
+    output:
+    tuple val(meta), path("${meta.sample}.fusion.validated.tsv"), emit: validated
+    tuple val(meta), path("${meta.sample}.fusion.audit.tsv"), emit: audit
+    tuple val(meta), path("${meta.sample}.fusion.rejected.tsv"), emit: rejected
+    script:
+    """
+    set -euo pipefail
+    python ${validator} fusion \\
+        --input ${fusions} --sample ${meta.sample} \\
+        --min-split-reads ${params.rna_fusion_min_split_reads} \\
+        --min-total-support ${params.rna_fusion_min_total_support} \\
+        --output-prefix ${meta.sample}.fusion
+    """
+}
+
+process VALIDATE_RNA_SPLICE_TRANSCRIPTS {
+    tag "${meta.sample}"
+    cpus 2; memory '8 GB'; time '24h'; disk '150 GB'
+    container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
+    publishDir "${params.outdir}/rna_validation/splicing", mode:'copy'
+    input:
+    tuple val(meta), path(novel_gtf), path(bam), path(bai)
+    path validator
+    output:
+    tuple val(meta), path("${meta.sample}.splice.validated.gtf"), emit: validated
+    tuple val(meta), path("${meta.sample}.splice.audit.tsv"), emit: audit
+    tuple val(meta), path("${meta.sample}.splice.rejected.tsv"), emit: rejected
+    script:
+    """
+    set -euo pipefail
+    ${params.host_python} ${validator} splice \\
+        --input ${novel_gtf} --bam ${bam} --sample ${meta.sample} \\
+        --min-junction-reads ${params.splice_min_junction_reads} \\
+        --output-prefix ${meta.sample}.splice
+    """
+}
+
+process VALIDATE_VARIANT_CODONS {
+    tag "${meta.sample}:genome_read_codon_validation"
+    cpus 2; memory '4 GB'; time '8h'; disk '100 GB'
+    container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
+    input:
+    tuple val(meta), path(vcf), path(tbi), path(bam), path(bai)
+    path genome
+    path validation_script
+    output:
+    tuple val(meta), path("${meta.sample}.variant_codon_validation.all.tsv"), path("${meta.sample}.variant_codon_validation.validated.tsv"), path("${meta.sample}.variant_codon_validation.partial.tsv"), path("${meta.sample}.variant_codon_validation.failed.tsv"), path("${meta.sample}.variant_codon_validation.category_summary.tsv"), path("${meta.sample}.variant_codon_validation.summary.txt"), path("${meta.sample}.variant_codon_validation.report.md")
+    script:
+    """
+    set -euo pipefail
+    ${params.host_python} ${validation_script} \
+        --vcf ${vcf} \
+        --bam ${meta.sample}=${bam} \
+        --genome ${genome} \
+        --threads ${task.cpus} \
+        --min-base-quality 20 \
+        --min-mapping-quality 20 \
+        --min-alt-reads ${params.rna_variant_min_alt_reads} \
+        --min-alt-fraction ${params.rna_variant_min_alt_fraction} \
+        --output-prefix ${meta.sample}.variant_codon_validation
+    """
+}
+
+process VALIDATE_VARIANT_READ_PROVENANCE {
+    tag "${meta.sample}:variant_supporting_read_provenance"
+    cpus 2; memory '12 GB'; time '8h'; disk '100 GB'
+    container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
+    input:
+    tuple val(meta), path(vcf), path(tbi), path(bam), path(bai)
+    path samplesheet
+    path validation_script
+    output:
+    tuple val(meta), path("${meta.sample}.variant_read_provenance.supporting_reads.tsv"), path("${meta.sample}.variant_read_provenance.summary.txt"), path("${meta.sample}.variant_read_provenance.report.md")
+    script:
+    """
+    set -euo pipefail
+    ${params.host_python} ${validation_script} \
+        --vcf ${vcf} \
+        --bam ${meta.sample}=${bam} \
+        --samples ${samplesheet} \
+        --threads ${task.cpus} \
+        --min-base-quality 20 \
+        --min-mapping-quality 20 \
+        --output-prefix ${meta.sample}.variant_read_provenance
+    """
+}
+
+process MERGE_VARIANT_CODON_VALIDATION {
+    tag 'merge_variant_codon_validation'
+    cpus 1; memory '4 GB'; time '6h'; disk '100 GB'
+    publishDir "${params.outdir}/rna_validation/variant_codons", mode:'copy'
+    input:
+    path inputs
+    path merger
+    output:
+    path 'variant_codon_validation.all.tsv', emit: all
+    path 'variant_codon_validation.validated.tsv', emit: validated
+    path 'variant_codon_validation.partial.tsv', emit: partial
+    path 'variant_codon_validation.failed.tsv', emit: failed
+    path 'variant_codon_validation.category_summary.tsv', emit: category_summary
+    path 'variant_codon_validation.summary.txt', emit: summary
+    path 'variant_codon_validation.report.md', emit: report
+    script:
+    """
+    python ${merger} --mode codon --inputs ${inputs} --output-prefix variant_codon_validation
+    """
+}
+
+process MERGE_VARIANT_READ_PROVENANCE {
+    tag 'merge_variant_read_provenance'
+    cpus 1; memory '4 GB'; time '6h'; disk '200 GB'
+    publishDir "${params.outdir}/rna_validation/variant_read_provenance", mode:'copy'
+    input:
+    path inputs
+    path merger
+    output:
+    path 'variant_read_provenance.supporting_reads.tsv', emit: reads
+    path 'variant_read_provenance.summary.txt', emit: summary
+    path 'variant_read_provenance.report.md', emit: report
+    script:
+    """
+    python ${merger} --mode provenance --inputs ${inputs} --output-prefix variant_read_provenance
+    """
+}
+
+process ANALYZE_CODON_MISMATCHES {
+    tag 'codon_translation_mismatch_investigation'
+    cpus 1; memory '2 GB'; time '4h'; disk '50 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/rna_validation/variant_codons", mode:'copy'
+    input:
+    path codon_table
+    path analysis_script
+    output:
+    path 'codon_mismatch_analysis.detailed.tsv', emit: detailed
+    path 'codon_mismatch_analysis.summary.tsv', emit: summary
+    path 'codon_mismatch_analysis.manual_review.tsv', emit: manual_review
+    path 'codon_mismatch_analysis.report.md', emit: report
+    script:
+    """
+    set -euo pipefail
+    python ${analysis_script} \
+        --input ${codon_table} \
+        --output-prefix codon_mismatch_analysis
+    """
+}
+
 process PYPGATK_FASTA {
-    tag "${meta.sample}"; cpus 8; memory '32 GB'; time '12h'; disk '80 GB'; queue 'normal'
+    tag "${meta.sample}"; cpus 1; memory '2 GB'; time '8h'; disk '150 GB'
     container 'quay.io/biocontainers/pypgatk:0.0.24--pyhdfd78af_0'
     publishDir "${params.outdir}/variant_fasta", mode:'copy'
     input: tuple val(meta), path(vcf), path(tbi); path gtf; path cdna
@@ -403,7 +808,7 @@ process PYPGATK_FASTA {
 }
 
 process ARRIBA {
-    tag "${meta.sample}"; cpus 8; memory '32 GB'; time '12h'; disk '60 GB'; queue 'normal'
+    tag "${meta.sample}"; cpus 8; memory '32 GB'; time '12h'; disk '60 GB'
     container 'quay.io/biocontainers/arriba:2.4.0--h0033a41_2'
     publishDir "${params.outdir}/fusions", mode:'copy'
     input: tuple val(meta), path(bam); path genome; path gtf; path blacklist; path known; path domains
@@ -418,8 +823,8 @@ process ARRIBA {
 
 process FUSION_FASTA {
     tag "${meta.sample}"
-    cpus 4; memory '16 GB'; time '8h'; disk '20 GB'; queue 'normal'
-    container "${projectDir}/singularity_cache/pvactools-7.1.1.img"
+    cpus 2; memory '8 GB'; time '12h'; disk '100 GB'
+    container "${params.container_cache}/pvactools-7.1.1.img"
     publishDir "${params.outdir}/fusion_fasta", mode:'copy'
     input: tuple val(meta), path(fusions)
     output: tuple val(meta), path("${meta.sample}.fusion_proteins.fasta")
@@ -441,8 +846,8 @@ process FUSION_FASTA {
 
 process STRINGTIE_ASSEMBLY {
     tag "${meta.sample}"
-    cpus 20; memory '64 GB'; time '24h'; disk '80 GB'; queue 'normal'
-    container "${projectDir}/singularity_cache/stringtie-3.0.3.img"
+    cpus 8; memory '32 GB'; time '36h'; disk '400 GB'
+    container "${params.container_cache}/stringtie-3.0.3.img"
     publishDir "${params.outdir}/splicing/stringtie", mode:'copy'
     input: tuple val(meta), path(bam), path(bai); path gtf
     output: tuple val(meta), path("${meta.sample}.assembled.gtf")
@@ -462,8 +867,8 @@ process STRINGTIE_ASSEMBLY {
 
 process GFFCOMPARE_NOVEL {
     tag "${meta.sample}"
-    cpus 4; memory '16 GB'; time '8h'; disk '30 GB'; queue 'normal'
-    container "${projectDir}/singularity_cache/gffcompare-0.12.10.img"
+    cpus 2; memory '8 GB'; time '16h'; disk '150 GB'
+    container "${params.container_cache}/gffcompare-0.12.10.img"
     publishDir "${params.outdir}/splicing/gffcompare", mode:'copy'
     input:
     tuple val(meta), path(assembled_gtf)
@@ -526,8 +931,8 @@ process GFFCOMPARE_NOVEL {
 
 process SPLICE_PROTEIN_FASTA {
     tag "${meta.sample}"
-    cpus 20; memory '64 GB'; time '24h'; disk '60 GB'; queue 'normal'
-    container "${projectDir}/singularity_cache/transdecoder-6.0.0.img"
+    cpus 8; memory '32 GB'; time '48h'; disk '300 GB'
+    container "${params.container_cache}/transdecoder-6.0.0.img"
     publishDir "${params.outdir}/splice_fasta", mode:'copy'
     input: tuple val(meta), path(novel_gtf); path genome
     output: tuple val(meta), path("${meta.sample}.splice_proteins.fasta")
@@ -589,102 +994,162 @@ process SPLICE_PROTEIN_FASTA {
 
 process COMBINE_PROTEIN_FASTA {
     tag "${meta.sample}"
-    cpus 2; memory '8 GB'; time '4h'; disk '30 GB'; queue 'normal'
+    cpus 1; memory '4 GB'; time '12h'; disk '100 GB'
     publishDir "${params.outdir}/combined_fasta", mode:'copy'
     input:
     tuple val(meta), path(variant_fasta), path(fusion_fasta), path(splice_fasta)
-    path proteome
     output: tuple val(meta), path("${meta.sample}.exploratory_proteogenomics.fasta")
     script:
     """
     set -euo pipefail
-    cat ${proteome} ${variant_fasta} ${fusion_fasta} ${splice_fasta} \\
-        > ${meta.sample}.combined.raw.fasta
-
+    cat ${variant_fasta} ${fusion_fasta} ${splice_fasta} > ${meta.sample}.custom_events.raw.fasta
     awk '
         /^>/ {
-            if (sequence != "" && !seen[sequence]++) {
-                print header
-                print sequence
-            }
+            if (header != "" && sequence != "" && !seen[sequence]++) { print header; print sequence }
             header = \$0
             sequence = ""
             next
         }
         { sequence = sequence \$0 }
         END {
-            if (sequence != "" && !seen[sequence]++) {
-                print header
-                print sequence
-            }
+            if (header != "" && sequence != "" && !seen[sequence]++) { print header; print sequence }
         }
-    ' ${meta.sample}.combined.raw.fasta \\
-        > ${meta.sample}.exploratory_proteogenomics.fasta
-
+    ' ${meta.sample}.custom_events.raw.fasta > ${meta.sample}.exploratory_proteogenomics.fasta
     test -s ${meta.sample}.exploratory_proteogenomics.fasta
+    if grep -q '^>CANONICAL|' ${meta.sample}.exploratory_proteogenomics.fasta; then
+        echo 'ERROR: canonical sequence detected in custom event FASTA' >&2
+        exit 1
+    fi
     """
 }
 
 process PROGRESSION_SUBTRACT {
-    tag "${meta.sample}"; cpus 2; memory '8 GB'; time '4h'; disk '20 GB'; queue 'normal'
+    tag "${meta.sample}"; cpus 2; memory '8 GB'; time '4h'; disk '50 GB'
     container 'quay.io/biocontainers/bcftools:1.21--h8b25389_0'
     publishDir "${params.outdir}/progression_vcf", mode:'copy'
     input: tuple val(meta), path(pv), path(pt), path(bv), path(bt)
-    output: tuple val(meta), path("${meta.sample}.progression.vep.vcf.gz"), path("${meta.sample}.progression.vep.vcf.gz.tbi")
-    script:
-    """
-    bcftools isec -C -w 1 -O z -o ${meta.sample}.progression.vep.vcf.gz ${pv} ${bv}
-    bcftools index --tbi ${meta.sample}.progression.vep.vcf.gz
-    """
-}
-
-process PROGRESSION_FASTA {
-    tag "${meta.sample}"; cpus 8; memory '32 GB'; time '12h'; disk '80 GB'; queue 'normal'
-    container 'quay.io/biocontainers/pypgatk:0.0.24--pyhdfd78af_0'
-    publishDir "${params.outdir}/progression_fasta", mode:'copy'
-    input: tuple val(meta), path(vcf), path(tbi); path gtf; path cdna
-    output: path "${meta.sample}.progression_proteins.fasta"
+    output:
+    tuple val(meta),
+        path("${meta.sample}.nonbaseline_only.vep.vcf.gz"), path("${meta.sample}.nonbaseline_only.vep.vcf.gz.tbi"),
+        path("${meta.sample}.baseline_only.vep.vcf.gz"), path("${meta.sample}.baseline_only.vep.vcf.gz.tbi"),
+        path("${meta.sample}.shared_with_baseline.vep.vcf.gz"), path("${meta.sample}.shared_with_baseline.vep.vcf.gz.tbi"),
+        path("${meta.sample}.subtraction.summary.tsv")
     script:
     """
     set -euo pipefail
-
-    gzip -t ${vcf}
-    gzip -dc ${vcf} > ${meta.sample}.progression.pypgatk.vcf
-    test -s ${meta.sample}.progression.pypgatk.vcf
-    grep -q '^##fileformat=VCF' ${meta.sample}.progression.pypgatk.vcf
-
-    if ! grep -qv '^#' ${meta.sample}.progression.pypgatk.vcf; then
-        echo "Warning: no progression VCF records for ${meta.sample}" >&2
-        : > ${meta.sample}.progression_proteins.fasta
-        exit 0
-    fi
-
-    pypgatk vcf-to-proteindb \
-        --vcf ${meta.sample}.progression.pypgatk.vcf \
-        --input_fasta ${cdna} \
-        --gene_annotations_gtf ${gtf} \
-        --annotation_field_name CSQ \
-        --af_field AF \
-        --include_consequences missense_variant,frameshift_variant,stop_gained,stop_lost,start_lost,splice_donor_variant,splice_acceptor_variant,inframe_insertion,inframe_deletion \
-        --output_proteindb ${meta.sample}.progression_proteins.fasta
-
-    if [[ ! -s ${meta.sample}.progression_proteins.fasta ]]; then
-        echo "Warning: no progression proteins generated for ${meta.sample}" >&2
-        : > ${meta.sample}.progression_proteins.fasta
-    fi
-    sed -i 's/^>/>${meta.sample}|PROGRESSION|/' ${meta.sample}.progression_proteins.fasta
+    mkdir isec
+    bcftools isec -p isec -O z ${pv} ${bv}
+    cp isec/0000.vcf.gz ${meta.sample}.nonbaseline_only.vep.vcf.gz
+    cp isec/0001.vcf.gz ${meta.sample}.baseline_only.vep.vcf.gz
+    cp isec/0002.vcf.gz ${meta.sample}.shared_with_baseline.vep.vcf.gz
+    for f in ${meta.sample}.nonbaseline_only.vep.vcf.gz ${meta.sample}.baseline_only.vep.vcf.gz ${meta.sample}.shared_with_baseline.vep.vcf.gz; do bcftools index --tbi -f "\$f"; done
+    printf 'Sample\tCategory\tRecords\n' > ${meta.sample}.subtraction.summary.tsv
+    for category in nonbaseline_only baseline_only shared_with_baseline; do
+        count=\$(bcftools view -H ${meta.sample}.\${category}.vep.vcf.gz | wc -l)
+        printf '${meta.sample}\t%s\t%s\n' "\$category" "\$count" >> ${meta.sample}.subtraction.summary.tsv
+    done
     """
 }
 
-process MULTIQC {
-    tag 'final_report'
-    cpus 8; memory '32 GB'; time '4h'; disk '40 GB'; queue 'normal'
+process BUILD_IGV_EVIDENCE_BUNDLE {
+    tag 'all_rna_progression_igv'
+    cpus 2; memory '8 GB'; time '24h'; disk '300 GB'
+    container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
+    publishDir "${params.outdir}/igv/all_evidence", mode:'copy'
+    input:
+    path rna_vcfs
+    path progression_vcfs
+    path fusion_tables
+    path splice_tables
+    path sorted_bams
+    path genome
+    path bundle_script
+    output:
+    path 'pgtk_igv.events.tsv', emit: events
+    path 'pgtk_igv.events.bed', emit: bed
+    path 'pgtk_igv.sample_manifest.tsv', emit: manifest
+    path 'pgtk_igv.igv.batch.txt', emit: batch
+    path 'pgtk_igv.igv.session.xml', emit: session
+    path 'pgtk_igv.summary.txt', emit: summary
+    path 'pgtk_igv.*.events.bam*', emit: bams
+    script:
+    def bamArgs=sorted_bams.findAll { it.name.endsWith('.bam') }.collect { bam -> "--bam ${bam.baseName.tokenize('.')[0]}=${bam}" }.join(' ')
+    """
+    python ${bundle_script} --genome ${genome} --rna-vcf ${rna_vcfs} --progression-vcf ${progression_vcfs} --fusion-table ${fusion_tables} --splice-table ${splice_tables} ${bamArgs} --padding ${params.read_validation_padding} --output-prefix pgtk_igv
+    """
+}
+
+process BUILD_COMPARATIVE_ADVANTAGE_REPORT {
+    tag 'comparative_biological_advantage'
+    cpus 1; memory '4 GB'; time '8h'; disk '100 GB'
     container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
-    publishDir "${params.outdir}/multiqc", mode:'copy'
+    publishDir "${params.outdir}/comparative_advantage", mode:'copy'
+    input:
+    path samplesheet
+    path raw_vcfs
+    path pass_vcfs
+    path rna_vcfs
+    path progression_vcfs
+    path fusion_tables
+    path splice_details
+    path variant_fastas
+    path fusion_fastas
+    path splice_fastas
+    path combined_fastas
+    path stage_qc_tables
+    path external_comparison_tables
+    path codon_summary
+    path provenance_summary
+    path report_script
+    output:
+    path 'comparative_advantage.report.md', emit: report
+    path 'comparative_advantage.variant_stage_inventory.tsv', emit: variant_inventory
+    path 'comparative_advantage.fasta_inventory.tsv', emit: fasta_inventory
+    path 'comparative_advantage.rna_event_inventory.tsv', emit: rna_inventory
+    path 'comparative_advantage.external_caller_comparison.tsv', emit: external_comparison
+    path 'comparative_advantage.multiqc_summary.tsv', emit: multiqc_summary
+    script:
+    """
+    python ${report_script} --samples ${samplesheet} --raw-vcf ${raw_vcfs} --pass-vcf ${pass_vcfs} --rna-vcf ${rna_vcfs} --progression-vcf ${progression_vcfs} --fusion-table ${fusion_tables} --splice-detail ${splice_details} --variant-fasta ${variant_fastas} --fusion-fasta ${fusion_fastas} --splice-fasta ${splice_fastas} --combined-fasta ${combined_fastas} --stage-qc ${stage_qc_tables} --external-comparison ${external_comparison_tables} --codon-summary ${codon_summary} --provenance-summary ${provenance_summary} --output-prefix comparative_advantage
+    """
+}
+
+process PREPARE_COMPARATIVE_MULTIQC_CONTENT {
+    tag 'comparative_multiqc_content'
+    cpus 1; memory '2 GB'; time '2h'; disk '20 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    input:
+    path report
+    path variant_inventory
+    path fasta_inventory
+    path rna_inventory
+    path external_comparison
+    path summary
+    output: path 'comparative_multiqc_content'
+    script:
+    """
+    mkdir comparative_multiqc_content
+    cp ${variant_inventory} comparative_multiqc_content/comparative_advantage_mqc.tsv
+    cp ${fasta_inventory} comparative_multiqc_content/fasta_inventory_mqc.tsv
+    cp ${rna_inventory} comparative_multiqc_content/rna_event_inventory_mqc.tsv
+    cp ${external_comparison} comparative_multiqc_content/external_caller_comparison_mqc.tsv
+    cp ${summary} comparative_multiqc_content/advantage_summary_mqc.tsv
+    python - ${report} <<'PY_MQC'
+import html,pathlib,sys
+text=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8',errors='replace')
+pathlib.Path('comparative_multiqc_content/18_comparative_biological_advantage_mqc.html').write_text('<h2>Comparative biological advantage</h2><pre style="white-space:pre-wrap">'+html.escape(text)+'</pre>',encoding='utf-8')
+PY_MQC
+    """
+}
+
+process MULTIQC_QC_DATA {
+    tag 'qc_data_pass'
+    cpus 4; memory '16 GB'; time '12h'; disk '150 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
     input: path qc_files
     output:
-    path 'multiqc_report.html'
-    path 'multiqc_report_data'
+    path 'multiqc_report.html', emit: report
+    path 'multiqc_report_data', emit: data
     script:
     """
     multiqc . \
@@ -696,9 +1161,62 @@ process MULTIQC {
     """
 }
 
+process BUILD_COMPLETE_FINDINGS_REPORT {
+    tag 'all_findings'
+    cpus 1; memory '2 GB'; time '12h'; disk '100 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/reports", mode:'copy'
+    input:
+    path samplesheet
+    path multiqc_data
+    path variant_audits
+    path fusion_audits
+    path splice_audits
+    path all_vep_vcfs
+    path all_arriba
+    path all_arriba_discarded
+    path all_assembled
+    path all_annotated_gtfs
+    path all_novel_gtfs
+    path variant_fastas
+    path fusion_fastas
+    path splice_fastas
+    path progression_vcfs
+    path reporter
+    output:
+    path 'complete_findings.report.md', emit: report
+    path 'complete_findings.rna_event_audit.tsv', emit: audit
+    path 'complete_findings.rna_validation_failures.tsv', emit: failures
+    path 'complete_findings.rna_validation_failures.md', emit: failure_report
+    path 'complete_findings.software_inventory.tsv', emit: inventory
+    path 'complete_findings.multiqc_general_stats.tsv', emit: qc_stats
+    path 'complete_findings.rna_variant_validation_explanations.md', emit: variant_explanations
+    script:
+    """
+    set -euo pipefail
+    python ${reporter} \\
+      --samples ${samplesheet} \\
+      --multiqc-data ${multiqc_data} \\
+      --variant-audit ${variant_audits} \\
+      --fusion-audit ${fusion_audits} \\
+      --splice-audit ${splice_audits} \\
+      --vep-vcf ${all_vep_vcfs} \\
+      --arriba ${all_arriba} \\
+      --arriba-discarded ${all_arriba_discarded} \\
+      --assembled-gtf ${all_assembled} \\
+      --annotated-gtf ${all_annotated_gtfs} \\
+      --novel-gtf ${all_novel_gtfs} \\
+      --variant-fasta ${variant_fastas} \\
+      --fusion-fasta ${fusion_fastas} \\
+      --splice-fasta ${splice_fastas} \\
+      --progression-vcf ${progression_vcfs} \\
+      --prefix complete_findings
+    """
+}
+
 process VALIDATE_MAXQUANT_INPUTS {
     tag 'maxquant_inputs'
-    cpus 1; memory '4 GB'; time '1h'; disk '10 GB'; queue 'normal'
+    cpus 1; memory '2 GB'; time '4h'; disk '30 GB'
     container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
     publishDir "${params.outdir}/proteogenomics_validation", mode:'copy'
     input:
@@ -707,21 +1225,24 @@ process VALIDATE_MAXQUANT_INPUTS {
     path msms
     path protein_groups
     path mqpar
-    path canonical_fasta
+    path canonical_fastas
     path contaminants_fasta
     output:
     path 'maxquant_inputs.validated.txt'
     script:
     """
     set -euo pipefail
-    python - ${peptides} ${evidence} ${msms} ${protein_groups} ${mqpar} ${canonical_fasta} ${contaminants_fasta} <<'PY_MQ'
+    python - ${peptides} ${evidence} ${msms} ${protein_groups} ${mqpar} ${contaminants_fasta} ${canonical_fastas} <<'PY_MQ'
 import csv
 import pathlib
 import sys
 import xml.etree.ElementTree as ET
 
-peptides, evidence, msms, protein_groups, mqpar, canonical, contaminants = map(pathlib.Path, sys.argv[1:])
-for path in (peptides, evidence, msms, protein_groups, mqpar, canonical, contaminants):
+peptides, evidence, msms, protein_groups, mqpar, contaminants = map(pathlib.Path, sys.argv[1:7])
+canonicals = [pathlib.Path(value) for value in sys.argv[7:]]
+if not canonicals:
+    raise SystemExit('no canonical FASTA files resolved')
+for path in (peptides, evidence, msms, protein_groups, mqpar, contaminants, *canonicals):
     if not path.is_file() or path.stat().st_size == 0:
         raise SystemExit(f'missing or empty input: {path}')
 required = {
@@ -746,21 +1267,28 @@ if (root.findtext('includeContaminants') or '').strip().lower() != 'true':
 with open('maxquant_inputs.validated.txt', 'w', encoding='utf-8') as handle:
     print(f'MaxQuant version: {version}', file=handle)
     print(f'Searched FASTA files: {len(fastas)}', file=handle)
-    print(f'Canonical FASTA supplied: {canonical}', file=handle)
+    print(f'Canonical FASTA files supplied: {len(canonicals)}', file=handle)
+    for canonical in canonicals:
+        print(f'Canonical FASTA: {canonical}', file=handle)
     print(f'Contaminant FASTA supplied: {contaminants}', file=handle)
+    print(f'Match Between Runs: {(root.findtext("matchBetweenRuns") or "unknown").strip()}', file=handle)
+    print(f'Match unidentified features: {(root.findtext("matchUnidentifiedFeatures") or "unknown").strip()}', file=handle)
+    print(f'MBR FDR enabled: {(root.findtext("matchBetweenRunsFdr") or "unknown").strip()}', file=handle)
+    print(f'Matching time window: {(root.findtext("matchingTimeWindow") or "unknown").strip()}', file=handle)
+    print(f'Alignment time window: {(root.findtext("alignmentTimeWindow") or "unknown").strip()}', file=handle)
 PY_MQ
     """
 }
 
 process MAP_MAXQUANT_PEPTIDES {
     tag 'peptide_fasta_mapping'
-    cpus 4; memory '24 GB'; time '12h'; disk '40 GB'; queue 'normal'
+    cpus 2; memory '16 GB'; time '24h'; disk '200 GB'
     container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
     publishDir "${params.outdir}/proteogenomics_validation", mode:'copy'
     input:
     path validation_stamp
     path peptides
-    path canonical_fasta
+    path canonical_fastas
     path contaminants_fasta
     path combined_fastas
     path mapper_script
@@ -773,17 +1301,14 @@ process MAP_MAXQUANT_PEPTIDES {
     set -euo pipefail
     python ${mapper_script} \\
         --peptides ${peptides} \\
-        --fasta ${canonical_fasta} ${contaminants_fasta} ${combined_fastas} \\
-        --group-map 2=TK12 \\
-        --group-map 3=TK13 \\
-        --group-map 4=TK14 \\
+        --fasta ${canonical_fastas} ${contaminants_fasta} ${combined_fastas} \\
         --output-prefix peptide_fasta_mapping
     """
 }
 
 process ANNOTATE_MAXQUANT_VARIANTS {
     tag 'variant_peptide_annotation'
-    cpus 4; memory '24 GB'; time '12h'; disk '40 GB'; queue 'normal'
+    cpus 2; memory '16 GB'; time '24h'; disk '200 GB'
     container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
     publishDir "${params.outdir}/proteogenomics_validation", mode:'copy'
     input:
@@ -796,6 +1321,8 @@ process ANNOTATE_MAXQUANT_VARIANTS {
     output:
     path 'variant_peptide_annotation.detailed.tsv', emit: detailed
     path 'variant_peptide_annotation.prioritized.tsv', emit: prioritized
+    path 'variant_peptide_annotation.validated.tsv', emit: validated
+    path 'variant_peptide_annotation.rejected.tsv', emit: rejected
     path 'variant_peptide_annotation.summary.txt', emit: summary
     path 'variant_peptide_annotation.unresolved.tsv', emit: unresolved
     script:
@@ -813,13 +1340,13 @@ process ANNOTATE_MAXQUANT_VARIANTS {
 
 process ANALYZE_MAXQUANT_JUNCTIONS {
     tag 'junction_peptide_analysis'
-    cpus 4; memory '24 GB'; time '12h'; disk '40 GB'; queue 'normal'
+    cpus 2; memory '16 GB'; time '24h'; disk '200 GB'
     container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
     publishDir "${params.outdir}/proteogenomics_validation", mode:'copy'
     input:
     path validation_stamp
     path peptides
-    path canonical_fasta
+    path canonical_fastas
     path contaminants_fasta
     path fusion_fastas
     path splice_fastas
@@ -836,20 +1363,17 @@ process ANALYZE_MAXQUANT_JUNCTIONS {
     set -euo pipefail
     python ${junction_script} \\
         --peptides ${peptides} \\
-        --canonical-fasta ${canonical_fasta} ${contaminants_fasta} \\
+        --canonical-fasta ${canonical_fastas} ${contaminants_fasta} \\
         --fusion-fasta ${fusion_fastas} \\
         --splice-fasta ${splice_fastas} \\
         --arriba ${arriba_tables} \\
-        --group-map 2=TK12 \\
-        --group-map 3=TK13 \\
-        --group-map 4=TK14 \\
         --output-prefix junction_peptide_analysis
     """
 }
 
 process VALIDATE_MAXQUANT_SPLICE_JUNCTIONS {
     tag 'validated_splice_junctions'
-    cpus 4; memory '24 GB'; time '12h'; disk '40 GB'; queue 'normal'
+    cpus 2; memory '12 GB'; time '24h'; disk '200 GB'
     container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
     publishDir "${params.outdir}/proteogenomics_validation", mode:'copy'
     input:
@@ -868,7 +1392,7 @@ process VALIDATE_MAXQUANT_SPLICE_JUNCTIONS {
     script:
     """
     set -euo pipefail
-    python ${validation_script} \\
+    ${params.host_python} ${validation_script} \\
         --candidates ${candidates} \\
         --splice-fasta ${splice_fastas} \\
         --transcript-gtf ${transcript_gtfs} \\
@@ -879,7 +1403,7 @@ process VALIDATE_MAXQUANT_SPLICE_JUNCTIONS {
 
 process BUILD_PROTEOGENOMICS_EVIDENCE_REPORT {
     tag 'proteogenomics_evidence_report'
-    cpus 4; memory '32 GB'; time '12h'; disk '40 GB'; queue 'normal'
+    cpus 1; memory '4 GB'; time '12h'; disk '200 GB'
     container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
     publishDir "${params.outdir}/proteogenomics_validation", mode:'copy'
     input:
@@ -894,13 +1418,37 @@ process BUILD_PROTEOGENOMICS_EVIDENCE_REPORT {
     path peptide_mapping
     path splice_validation
     path searched_fastas
+    val raw_map_mode
+    path raw_file_map
     path report_script
     output:
-    path 'proteogenomics_evidence.variants.tsv'
-    path 'proteogenomics_evidence.junctions.tsv'
-    path 'proteogenomics_evidence.report.md'
-    path 'proteogenomics_evidence.summary.txt'
+    path 'proteogenomics_evidence.variants.tsv', emit: variants
+    path 'proteogenomics_evidence.junctions.tsv', emit: junctions
+    path 'proteogenomics_evidence.direct_msms_variants.tsv', emit: direct_variants
+    path 'proteogenomics_evidence.mbr_only_variants.tsv', emit: mbr_variants
+    path 'proteogenomics_evidence.direct_msms_junctions.tsv', emit: direct_junctions
+    path 'proteogenomics_evidence.mbr_only_junctions.tsv', emit: mbr_junctions
+    path 'proteogenomics_evidence.raw_file_mapping.tsv', emit: raw_mapping
+    path 'proteogenomics_evidence.audit.tsv', emit: audit
+    path 'proteogenomics_evidence.rejected_associations.tsv', emit: rejected
+    path 'proteogenomics_evidence.validation_failures.md', emit: failure_report
+    path 'proteogenomics_evidence.unique_variants.tsv', emit: unique_variants
+    path 'proteogenomics_evidence.unique_junctions.tsv', emit: unique_junctions
+    path 'proteogenomics_evidence.unique_direct_msms_variants.tsv', emit: unique_direct_variants
+    path 'proteogenomics_evidence.unique_mbr_only_variants.tsv', emit: unique_mbr_variants
+    path 'proteogenomics_evidence.sample_matched_direct_msms_variants.tsv', emit: sample_matched_direct_variants
+    path 'proteogenomics_evidence.cross_sample_direct_msms_variants.tsv', emit: cross_sample_direct_variants
+    path 'proteogenomics_evidence.sample_matched_mbr_only_variants.tsv', emit: sample_matched_mbr_variants
+    path 'proteogenomics_evidence.cross_sample_mbr_only_variants.tsv', emit: cross_sample_mbr_variants
+    path 'proteogenomics_evidence.sample_matched_direct_msms_junctions.tsv', emit: sample_matched_direct_junctions
+    path 'proteogenomics_evidence.cross_sample_direct_msms_junctions.tsv', emit: cross_sample_direct_junctions
+    path 'proteogenomics_evidence.sample_matched_mbr_only_junctions.tsv', emit: sample_matched_mbr_junctions
+    path 'proteogenomics_evidence.cross_sample_mbr_only_junctions.tsv', emit: cross_sample_mbr_junctions
+    path 'proteogenomics_evidence.evidence_classification.md', emit: classification_report
+    path 'proteogenomics_evidence.report.md', emit: report
+    path 'proteogenomics_evidence.summary.txt', emit: summary
     script:
+    def rawMapArg = raw_map_mode == 'explicit' ? "--raw-file-map ${raw_file_map}" : ""
     """
     set -euo pipefail
     python ${report_script} \\
@@ -914,42 +1462,285 @@ process BUILD_PROTEOGENOMICS_EVIDENCE_REPORT {
         --peptide-mapping ${peptide_mapping} \\
         --splice-validation ${splice_validation} \\
         --searched-fasta ${searched_fastas} \\
+        ${rawMapArg} \\
         --output-prefix proteogenomics_evidence
     """
 }
 
+
+process BUILD_INTEGRATED_VARIANT_EVIDENCE {
+    tag 'strict_integrated_variant_evidence'
+    cpus 1; memory '4 GB'; time '8h'; disk '100 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/proteogenomics_validation", mode:'copy'
+    input:
+    path variants
+    path codon_validation
+    path codon_mismatch_analysis
+    path integration_script
+    output:
+    path 'integrated_variant_evidence.all.tsv', emit: all
+    path 'integrated_variant_evidence.strict.tsv', emit: strict
+    path 'integrated_variant_evidence.excluded.tsv', emit: excluded
+    path 'integrated_variant_evidence.report.md', emit: report
+    script:
+    """
+    set -euo pipefail
+    python ${integration_script} \
+        --variants ${variants} \
+        --codon-validation ${codon_validation} \
+        --codon-mismatch-analysis ${codon_mismatch_analysis} \
+        --output-prefix integrated_variant_evidence
+    """
+}
+
+process VALIDATE_PROTEOGENOMIC_READS {
+    tag 'proteogenomic_read_validation'
+    cpus 1; memory '32 GB'; time '48h'; disk '600 GB'
+    container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
+    publishDir "${params.outdir}/proteogenomics_validation/read_validation", mode:'copy'
+    input:
+    path variants
+    path junctions
+    path splice_detail
+    path arriba_tables
+    path sorted_bams
+    path reference_gtf
+    path genome
+    path validation_script
+    output:
+    path 'proteogenomic_read_validation.events.tsv'
+    path 'proteogenomic_read_validation.reads.tsv'
+    path 'proteogenomic_read_validation.fusions.tsv'
+    path 'proteogenomic_read_validation.summary.txt', emit: summary
+    path 'proteogenomic_read_validation.report.md', emit: report
+    path 'proteogenomic_read_validation.variants.bed'
+    path 'proteogenomic_read_validation.fusions.bedpe'
+    path 'proteogenomic_read_validation.junctions.bed'
+    path 'proteogenomic_read_validation.extraction_regions.bed'
+    path 'proteogenomic_read_validation.igv.batch.txt'
+    path 'proteogenomic_read_validation.*.bam*'
+    script:
+    def bamArgs = sorted_bams.findAll { file -> file.name.endsWith('.bam') }.collect { bam -> "--bam ${bam.baseName.tokenize('.')[0]}=${bam}" }.join(' ')
+    """
+    set -euo pipefail
+    ${params.host_python} ${validation_script} \
+        --variants ${variants} \
+        --junctions ${junctions} \
+        --splice-detail ${splice_detail} \
+        --arriba ${arriba_tables} \
+        ${bamArgs} \
+        --gtf ${reference_gtf} \
+        --genome ${genome} \
+        --padding ${params.read_validation_padding} \
+        --output-prefix proteogenomic_read_validation
+    """
+}
+
+process PREPARE_FINAL_MULTIQC_CONTENT {
+    tag 'integrated_report_content'
+    cpus 1; memory '2 GB'; time '6h'; disk '50 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    input:
+    path complete_report
+    path rna_failure_report
+    path rna_variant_explanations
+    path variant_codon_report
+    path variant_codon_summary
+    path codon_mismatch_report
+    path codon_mismatch_summary
+    path integrated_variant_evidence_report
+    path variant_read_provenance_report
+    path variant_read_provenance_summary
+    path proteogenomics_report
+    path proteogenomics_summary
+    path proteogenomics_classification_report
+    path proteogenomics_failure_report
+    path read_validation_report
+    path read_validation_summary
+    path validation_semantics
+    path comparative_report
+    path comparative_summary
+    output:
+    path 'multiqc_custom_content', emit: content
+    script:
+    """
+    set -euo pipefail
+    mkdir multiqc_custom_content
+    python - \\
+      ${complete_report} \\
+      ${rna_failure_report} \\
+      ${rna_variant_explanations} \\
+      ${variant_codon_report} \\
+      ${variant_codon_summary} \\
+      ${codon_mismatch_report} \\
+      ${codon_mismatch_summary} \\
+      ${integrated_variant_evidence_report} \\
+      ${variant_read_provenance_report} \\
+      ${variant_read_provenance_summary} \\
+      ${proteogenomics_report} \\
+      ${proteogenomics_summary} \\
+      ${proteogenomics_classification_report} \\
+      ${proteogenomics_failure_report} \\
+      ${read_validation_report} \\
+      ${read_validation_summary} \\
+      ${validation_semantics} \
+      ${comparative_report} \
+      ${comparative_summary} <<'PY_MQC'
+import html
+import pathlib
+import sys
+names = [
+    ('01_complete_findings_mqc.html','Complete RNA-seq and proteogenomics findings'),
+    ('02_rna_validation_failures_mqc.html','RNA validation failures'),
+    ('03_rna_variant_explanations_mqc.html','Why RNA variant candidates fail validation'),
+    ('04_variant_codon_validation_mqc.html','Independent genome, RNA-read and codon validation'),
+    ('05_variant_codon_summary_mqc.html','Independent variant-codon validation summary'),
+    ('06_codon_mismatch_investigation_mqc.html','Codon-translation mismatch investigation'),
+    ('07_codon_mismatch_summary_mqc.html','Codon-mismatch diagnostic table'),
+    ('08_strict_integrated_variant_evidence_mqc.html','Strict integrated variant evidence'),
+    ('09_variant_read_provenance_mqc.html','Variant-supporting RNA reads and mapping provenance'),
+    ('10_variant_read_provenance_summary_mqc.html','Variant-supporting read summary'),
+    ('11_proteogenomics_evidence_mqc.html','Proteogenomics evidence'),
+    ('12_proteogenomics_summary_mqc.html','Proteogenomics evidence summary'),
+    ('13_proteogenomics_classification_mqc.html','Sample-matched and cross-sample evidence'),
+    ('14_proteogenomics_failures_mqc.html','Proteogenomics validation failures'),
+    ('15_read_validation_mqc.html','Read-level validation'),
+    ('16_read_validation_summary_mqc.html','Read-level validation summary'),
+    ('17_validation_semantics_mqc.html','Validation statuses and failure-category semantics'),
+    ('18_comparative_biological_advantage_mqc.html','Comparative biological advantage'),
+    ('19_comparative_advantage_summary_mqc.html','Comparative advantage summary'),
+]
+if len(sys.argv[1:]) != len(names):
+    raise SystemExit(f'Expected {len(names)} report inputs, received {len(sys.argv[1:])}')
+for source,(filename,title) in zip(sys.argv[1:],names):
+    text=pathlib.Path(source).read_text(encoding='utf-8',errors='replace')
+    body='<h3>'+html.escape(title)+'</h3><pre style="white-space:pre-wrap">'+html.escape(text)+'</pre>'
+    pathlib.Path('multiqc_custom_content',filename).write_text(body,encoding='utf-8')
+PY_MQC
+    """
+}
+process MULTIQC_FINAL {
+    tag 'integrated_final_report'
+    cpus 4; memory '16 GB'; time '12h'; disk '150 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/multiqc", mode:'copy'
+    input:
+    path qc_files
+    path custom_content
+    output:
+    path 'multiqc_report.html', emit: report
+    path 'multiqc_report_data', emit: data
+    script:
+    """
+    set -euo pipefail
+    multiqc . \\
+        --force \\
+        --title 'PGTK complete RNA-seq and proteogenomics report' \\
+        --filename multiqc_report.html \\
+        --data-dir \\
+        --data-format tsv
+    """
+}
+
 workflow {
+    if (!params.host_python) error '--host_python is required'
+    if (!params.sra_dir) error '--sra_dir is required'
+    if (!params.reference_downloads) error '--reference_downloads is required'
+    if (!params.container_cache) error '--container_cache is required'
+    if (!params.ensembl_pep) error '--ensembl_pep is required'
     samples = channel.fromPath(params.samplesheet, checkIfExists:true).splitCsv(header:true).map { row ->
-        if (!row.sample || !row.srr || !row.TK || !row.Group) error 'samples.csv requires sample,srr,TK,Group,baseline'
-        def meta=[sample:row.sample.trim(),tk:row.TK.trim(),group:row.Group.trim(),baseline:(row.baseline?:'').trim().toLowerCase()]
+        if (!row.sample || !row.srr) error 'samples.csv requires sample and srr; TK, Group and baseline are optional'
+        def sample = row.sample.trim()
         def srr = row.srr.trim()
+        def baselineValue = (row.baseline ?: 'false').trim().toLowerCase()
+        if (!(baselineValue in ['true','false'])) error "baseline must be true or false for ${sample}"
+        def meta=[sample:sample, srr:srr, tk:(row.TK ?: sample).trim(), group:(row.Group ?: sample).trim(), baseline:baselineValue]
         def sraFile = file("${params.sra_dir}/${srr}/${srr}.sra", checkIfExists: true)
         tuple(meta, srr, sraFile)
     }
-    refs=DOWNLOAD_REFERENCES()
+    reference_genome_archive = file("${params.reference_downloads}/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz", checkIfExists:true)
+    reference_gtf_archive = file("${params.reference_downloads}/Homo_sapiens.GRCh38.111.gtf.gz", checkIfExists:true)
+    reference_cdna_archive = file("${params.reference_downloads}/Homo_sapiens.GRCh38.cdna.all.fa.gz", checkIfExists:true)
+    reference_proteome_archive = file("${params.reference_downloads}/human_reviewed_isoforms.fasta.gz", checkIfExists:true)
+    reference_vep_archive = file("${params.reference_downloads}/homo_sapiens_vep_111_GRCh38.tar.gz", checkIfExists:true)
+    reference_arriba_archive = file("${params.reference_downloads}/arriba_v2.4.0.tar.gz", checkIfExists:true)
+    refs=DOWNLOAD_REFERENCES(
+        reference_genome_archive,
+        reference_gtf_archive,
+        reference_cdna_archive,
+        reference_proteome_archive,
+        reference_vep_archive,
+        reference_arriba_archive
+    )
     ref=REF_INDEX(refs.genome)
     staridx=STAR_INDEX(refs.genome,refs.gtf)
     downloaded=SRA_TO_FASTQ(samples)
     reads=downloaded.map { m,r1,r2 -> tuple(m.sample,m,r1,r2) }.groupTuple(by:0).map { id,ms,r1s,r2s -> tuple(ms[0],r1s,r2s) } | CAT_FASTQ
     raw_qc=FASTQC_RAW(reads)
     trim_result=TRIM_GALORE(reads)
-    trimmed=params.skip_trimming ? reads : trim_result.reads
+    trimmed=trim_result.reads
     trimmed_qc=FASTQC_TRIMMED(trimmed)
     star_result=STAR_ALIGN(trimmed,staridx)
     arriba_result=ARRIBA(star_result.bam,refs.genome,refs.gtf,refs.blacklist,refs.known,refs.domains)
-    fusion_fasta=FUSION_FASTA(arriba_result.accepted)
     sortedbam=SORT_INDEX_BAM(star_result.bam)
     assembled=STRINGTIE_ASSEMBLY(sortedbam,refs.gtf)
     novel_result=GFFCOMPARE_NOVEL(assembled,refs.gtf)
-    splice_fasta=SPLICE_PROTEIN_FASTA(novel_result.novel,refs.genome)
+    rna_validator = file("${projectDir}/validate_rna_events.py", checkIfExists:true)
+    validated_fusions=VALIDATE_RNA_FUSIONS(arriba_result.accepted,rna_validator)
+    fusion_fasta=FUSION_FASTA(validated_fusions.validated)
+    novel_keyed=novel_result.novel.map { m,g -> tuple(m.sample,m,g) }
+    bam_keyed=sortedbam.map { m,b,bai -> tuple(m.sample,b,bai) }
+    splice_validation_inputs=novel_keyed.join(bam_keyed).map { sample,m,g,b,bai -> tuple(m,g,b,bai) }
+    validated_splice=VALIDATE_RNA_SPLICE_TRANSCRIPTS(splice_validation_inputs,rna_validator)
+    splice_fasta=SPLICE_PROTEIN_FASTA(validated_splice.validated,refs.genome)
     flagstat=SAMTOOLS_FLAGSTAT(sortedbam)
     md_result=MARK_DUPLICATES(sortedbam)
+    hc_intervals=PREPARE_HAPLOTYPE_INTERVALS(ref)
     split=SPLIT_N_CIGAR(md_result.bam,ref)
-    gvcf=HAPLOTYPE_CALLER(split,ref)
-    pass=GENOTYPE_FILTER(gvcf,ref)
+    hc_inputs=split.combine(hc_intervals.intervals.flatten()).map { m,b,bai,interval -> tuple(m,b,bai,interval) }
+    hc_parts=HAPLOTYPE_CALLER(hc_inputs,ref)
+    hc_grouped=hc_parts.map { m,shard,g,t -> tuple(m.sample,m,shard,g,t) }
+        .groupTuple(by:0)
+        .map { sample,metas,shards,gvcfs,tbis ->
+            def ordered=[shards,gvcfs,tbis].transpose().sort { left,right -> left[0] <=> right[0] }
+            tuple(metas[0],ordered.collect { it[1] },ordered.collect { it[2] })
+        }
+    shard_validator=file("${projectDir}/validate_haplotype_shards.py", checkIfExists:true)
+    validated_hc_shards=VALIDATE_HAPLOTYPE_SHARDS(hc_grouped,shard_validator)
+    gvcf=GATHER_HAPLOTYPE_GVCF(validated_hc_shards)
+    genotype_result=GENOTYPE_FILTER(gvcf,ref)
+    pass=genotype_result.pass
     variant_stats=BCFTOOLS_STATS(pass)
     annotated=VEP_ANNOTATE(pass,ref,refs.vep_cache)
-    variant_fasta=PYPGATK_FASTA(annotated,refs.gtf,refs.cdna)
+    validated_variants=VALIDATE_RNA_VARIANTS(annotated,refs.genome,rna_validator)
+    stage_qc_inputs=genotype_result.raw.map { m,v,tbi -> tuple(m.sample,m,v,tbi) }
+        .join(genotype_result.pass.map { m,v,tbi -> tuple(m.sample,v,tbi) })
+        .join(validated_variants.validated.map { m,v,tbi -> tuple(m.sample,v,tbi) })
+        .map { sample,m,raw,raw_tbi,pass_vcf,pass_tbi,rna,rna_tbi -> tuple(m,raw,raw_tbi,pass_vcf,pass_tbi,rna,rna_tbi) }
+    stage_summarizer=file("${projectDir}/summarize_variant_stages.py", checkIfExists:true)
+    variant_stage_qc=VARIANT_STAGE_QC(stage_qc_inputs,refs.genome,stage_summarizer)
+    external_comparison_tables = channel.value([file("${projectDir}/external_comparison.none.tsv", checkIfExists:true)])
+    if (params.run_external_vcf_comparison) {
+        if (!params.external_vcf_dir) error '--external_vcf_dir is required when --run_external_vcf_comparison true'
+        comparison_script=file("${projectDir}/compare_external_vcf.py", checkIfExists:true)
+        external_inputs=genotype_result.raw.map { m,v,tbi -> tuple(m,v,tbi,resolveExternalVcf(params.external_vcf_dir.toString(),m.srr,params.external_vcf_suffix.toString())) }
+        external_comparison_result=COMPARE_EXTERNAL_VCF(external_inputs,comparison_script)
+        external_comparison_tables = external_comparison_result.summary.collect()
+    }
+    variant_read_provenance_script = file("${projectDir}/validate_variant_read_provenance.py", checkIfExists:true)
+    variant_codon_script = file("${projectDir}/validate_variant_codons.py", checkIfExists:true)
+    variant_validation_merger = file("${projectDir}/merge_variant_validation.py", checkIfExists:true)
+    validated_variant_keyed = validated_variants.validated.map { m,v,t -> tuple(m.sample,m,v,t) }
+    sorted_bam_keyed_for_variant_validation = sortedbam.map { m,b,bai -> tuple(m.sample,b,bai) }
+    variant_validation_inputs = validated_variant_keyed.join(sorted_bam_keyed_for_variant_validation).map { sample,m,v,t,b,bai -> tuple(m,v,t,b,bai) }
+    variant_codon_parts = VALIDATE_VARIANT_CODONS(variant_validation_inputs, refs.genome, variant_codon_script)
+    variant_provenance_parts = VALIDATE_VARIANT_READ_PROVENANCE(variant_validation_inputs, file(params.samplesheet, checkIfExists:true), variant_read_provenance_script)
+    variant_codon_validation = MERGE_VARIANT_CODON_VALIDATION(variant_codon_parts.map { m,a,v,p,f,c,s,r -> [a,v,p,f,c,s,r] }.flatten().collect(), variant_validation_merger)
+    codon_mismatch_script = file("${projectDir}/analyze_codon_mismatches.py", checkIfExists:true)
+    codon_mismatch_analysis = ANALYZE_CODON_MISMATCHES(variant_codon_validation.all, codon_mismatch_script)
+    variant_read_provenance = MERGE_VARIANT_READ_PROVENANCE(variant_provenance_parts.map { m,t,s,r -> [t,s,r] }.flatten().collect(), variant_validation_merger)
+    variant_fasta=PYPGATK_FASTA(validated_variants.validated,refs.gtf,refs.cdna)
 
     variant_keyed=variant_fasta.map { m,f -> tuple(m.sample,m,f) }
     fusion_keyed=fusion_fasta.map { m,f -> tuple(m.sample,m,f) }
@@ -958,31 +1749,79 @@ workflow {
         .join(fusion_keyed)
         .join(splice_keyed)
         .map { sample,m1,vf,m2,ff,m3,sf -> tuple(m1,vf,ff,sf) }
-    combined_fasta=COMBINE_PROTEIN_FASTA(combined_inputs,refs.proteome)
-    groups=annotated.branch { m,v,t -> baseline:m.baseline=='true'; progression:m.baseline=='false'; other:true }
+    combined_fasta=COMBINE_PROTEIN_FASTA(combined_inputs)
+    groups=validated_variants.validated.branch { m,v,t -> baseline:m.baseline=='true'; progression:m.baseline=='false'; other:true }
     bases=groups.baseline.map { m,v,t -> tuple(m.tk,v,t) }
     pairs=groups.progression.map { m,v,t -> tuple(m.tk,m,v,t) }.combine(bases,by:0).map { k,m,pv,pt,bv,bt -> tuple(m,pv,pt,bv,bt) }
     prog=PROGRESSION_SUBTRACT(pairs)
-    PROGRESSION_FASTA(prog,refs.gtf,refs.cdna)
 
     qc_files = raw_qc.qc
         .mix(trimmed_qc.qc, trim_result.reports, star_result.logs,
              flagstat, md_result.metrics, variant_stats)
         .collect()
-    MULTIQC(qc_files)
+    multiqc_result=MULTIQC_QC_DATA(qc_files)
+    igv_bundle_script=file("${projectDir}/build_igv_evidence_bundle.py",checkIfExists:true)
+    igv_bundle=BUILD_IGV_EVIDENCE_BUNDLE(
+        validated_variants.validated.map { m,v,t -> v }.collect(),
+        prog.map { m,nv,nt,bv,bt,sv,st,su -> nv }.collect(),
+        validated_fusions.validated.map { m,f -> f }.collect(),
+        validated_splice.audit.map { m,f -> f }.collect(),
+        sortedbam.map { m,b,bai -> [b,bai] }.flatten().collect(),
+        refs.genome,
+        igv_bundle_script
+    )
+    comparative_report_script=file("${projectDir}/build_comparative_advantage_report.py", checkIfExists:true)
+    comparative_report=BUILD_COMPARATIVE_ADVANTAGE_REPORT(
+        file(params.samplesheet,checkIfExists:true),
+        genotype_result.raw.map { m,v,t -> v }.collect(),
+        genotype_result.pass.map { m,v,t -> v }.collect(),
+        validated_variants.validated.map { m,v,t -> v }.collect(),
+        prog.map { m,nv,nt,bv,bt,sv,st,su -> nv }.collect(),
+        validated_fusions.validated.map { m,f -> f }.collect(),
+        validated_splice.audit.map { m,f -> f }.collect(),
+        variant_fasta.map { m,f -> f }.collect(),
+        fusion_fasta.map { m,f -> f }.collect(),
+        splice_fasta.map { m,f -> f }.collect(),
+        combined_fasta.map { m,f -> f }.collect(),
+        variant_stage_qc.table.collect(),
+        external_comparison_tables,
+        variant_codon_validation.summary,
+        variant_read_provenance.summary,
+        comparative_report_script
+    )
+    comparative_multiqc=PREPARE_COMPARATIVE_MULTIQC_CONTENT(comparative_report.report,comparative_report.variant_inventory,comparative_report.fasta_inventory,comparative_report.rna_inventory,comparative_report.external_comparison,comparative_report.multiqc_summary)
+
+    complete_reporter=file("${projectDir}/build_complete_report.py", checkIfExists:true)
+    report_samplesheet=file(params.samplesheet, checkIfExists:true)
+    complete_findings=BUILD_COMPLETE_FINDINGS_REPORT(
+        report_samplesheet,
+        multiqc_result.data,
+        validated_variants.audit.map { m,f -> f }.collect(),
+        validated_fusions.audit.map { m,f -> f }.collect(),
+        validated_splice.audit.map { m,f -> f }.collect(),
+        annotated.map { m,v,t -> v }.collect(),
+        arriba_result.accepted.map { m,f -> f }.collect(),
+        arriba_result.discarded.collect(),
+        assembled.map { m,g -> g }.collect(),
+        novel_result.annotated.map { m,g -> g }.collect(),
+        novel_result.novel.map { m,g -> g }.collect(),
+        variant_fasta.map { m,f -> f }.collect(),
+        fusion_fasta.map { m,f -> f }.collect(),
+        splice_fasta.map { m,f -> f }.collect(),
+        prog.map { m,nv,nt,bv,bt,sv,st,su -> nv }.collect(),
+        complete_reporter
+    )
 
     if (params.run_proteogenomic_validation) {
-        if (!params.maxquant_txt) error '--maxquant_txt is required when --run_proteogenomic_validation is enabled'
-        if (!params.maxquant_mqpar) error '--maxquant_mqpar is required when --run_proteogenomic_validation is enabled'
-        if (!params.maxquant_canonical_fasta) error '--maxquant_canonical_fasta is required when --run_proteogenomic_validation is enabled'
-
+        if (!new File(params.maxquant_txt.toString()).isDirectory()) error "MaxQuant folder not found: ${params.maxquant_txt}"
         mq_peptides = file("${params.maxquant_txt}/peptides.txt", checkIfExists:true)
         mq_evidence = file("${params.maxquant_txt}/evidence.txt", checkIfExists:true)
         mq_msms = file("${params.maxquant_txt}/msms.txt", checkIfExists:true)
         mq_protein_groups = file("${params.maxquant_txt}/proteinGroups.txt", checkIfExists:true)
-        mq_mqpar = file(params.maxquant_mqpar, checkIfExists:true)
-        mq_canonical = file(params.maxquant_canonical_fasta, checkIfExists:true)
-        mq_contaminants = file(params.maxquant_contaminants, checkIfExists:true)
+        mq_mqpar = resolveMaxQuantMqpar(params.maxquant_txt, params.maxquant_mqpar)
+        mq_contaminants = resolveContaminants(params.maxquant_contaminants?.toString(), params.maxquant_txt.toString())
+        raw_map_mode = params.maxquant_raw_map ? 'explicit' : 'default'
+        mq_raw_map = params.maxquant_raw_map ? file(params.maxquant_raw_map, checkIfExists:true) : file("${projectDir}/maxquant_raw_file_map.none.tsv", checkIfExists:true)
         ensembl_pep = file(params.ensembl_pep, checkIfExists:true)
 
         mapper_script = file("${projectDir}/map_peptides_to_fasta.py", checkIfExists:true)
@@ -990,21 +1829,56 @@ workflow {
         junction_script = file("${projectDir}/analyze_chimeric_splice_peptides.py", checkIfExists:true)
         splice_validation_script = file("${projectDir}/validate_splice_junction_peptides.py", checkIfExists:true)
         report_script = file("${projectDir}/proteogenomics_evidence_report.py", checkIfExists:true)
+        read_validation_script = file("${projectDir}/validate_proteogenomic_reads.py", checkIfExists:true)
         report_samplesheet = file(params.samplesheet, checkIfExists:true)
 
-        validation_stamp = VALIDATE_MAXQUANT_INPUTS(mq_peptides, mq_evidence, mq_msms, mq_protein_groups, mq_mqpar, mq_canonical, mq_contaminants)
         combined_fastas_for_validation = combined_fasta.map { m,f -> f }.collect()
+        sample_fasta_basenames = new File(params.samplesheet.toString()).readLines().drop(1).findAll { it.trim() }.collect { row ->
+            def sample = row.split(',', -1)[0].trim()
+            "${sample}.exploratory_proteogenomics.fasta"
+        }
+        mq_canonicals = resolveMaxQuantCanonicalFastas(mq_mqpar, params.maxquant_txt, params.maxquant_canonical_fasta, sample_fasta_basenames)
+        validation_stamp = VALIDATE_MAXQUANT_INPUTS(mq_peptides, mq_evidence, mq_msms, mq_protein_groups, mq_mqpar, mq_canonicals, mq_contaminants)
         fusion_fastas_for_validation = fusion_fasta.map { m,f -> f }.collect()
         splice_fastas_for_validation = splice_fasta.map { m,f -> f }.collect()
-        assembled_gtfs_for_validation = assembled.map { m,g -> g }.collect()
-        arriba_tables_for_validation = arriba_result.accepted.map { m,f -> f }.collect()
-        vep_vcfs_for_validation = annotated.map { m,v,t -> v }.collect()
-        searched_fastas_for_report = combined_fastas_for_validation.map { fastas -> fastas + [mq_canonical] }
+        assembled_gtfs_for_validation = validated_splice.validated.map { m,g -> g }.collect()
+        arriba_tables_for_validation = validated_fusions.validated.map { m,f -> f }.collect()
+        vep_vcfs_for_validation = validated_variants.validated.map { m,v,t -> v }.collect()
+        searched_fastas_for_report = combined_fastas_for_validation.map { fastas -> fastas + mq_canonicals }
 
-        peptide_mapping = MAP_MAXQUANT_PEPTIDES(validation_stamp, mq_peptides, mq_canonical, mq_contaminants, combined_fastas_for_validation, mapper_script)
+        peptide_mapping = MAP_MAXQUANT_PEPTIDES(validation_stamp, mq_peptides, mq_canonicals, mq_contaminants, combined_fastas_for_validation, mapper_script)
         variant_annotation = ANNOTATE_MAXQUANT_VARIANTS(validation_stamp, peptide_mapping.mapping, vep_vcfs_for_validation, combined_fastas_for_validation, ensembl_pep, annotation_script)
-        junction_analysis = ANALYZE_MAXQUANT_JUNCTIONS(validation_stamp, mq_peptides, mq_canonical, mq_contaminants, fusion_fastas_for_validation, splice_fastas_for_validation, arriba_tables_for_validation, junction_script)
+        junction_analysis = ANALYZE_MAXQUANT_JUNCTIONS(validation_stamp, mq_peptides, mq_canonicals, mq_contaminants, fusion_fastas_for_validation, splice_fastas_for_validation, arriba_tables_for_validation, junction_script)
         splice_validation = VALIDATE_MAXQUANT_SPLICE_JUNCTIONS(validation_stamp, junction_analysis.splice_candidates, splice_fastas_for_validation, assembled_gtfs_for_validation, refs.gtf, splice_validation_script)
-        BUILD_PROTEOGENOMICS_EVIDENCE_REPORT(validation_stamp, report_samplesheet, mq_mqpar, mq_evidence, mq_msms, mq_protein_groups, vep_vcfs_for_validation, variant_annotation.detailed, peptide_mapping.mapping, splice_validation.detailed, searched_fastas_for_report, report_script)
+        evidence_report = BUILD_PROTEOGENOMICS_EVIDENCE_REPORT(validation_stamp, report_samplesheet, mq_mqpar, mq_evidence, mq_msms, mq_protein_groups, vep_vcfs_for_validation, variant_annotation.detailed, peptide_mapping.mapping, splice_validation.detailed, searched_fastas_for_report, raw_map_mode, mq_raw_map, report_script)
+        integrated_variant_script = file("${projectDir}/build_integrated_variant_evidence.py", checkIfExists:true)
+        integrated_variant_evidence = BUILD_INTEGRATED_VARIANT_EVIDENCE(evidence_report.variants, variant_codon_validation.all, codon_mismatch_analysis.detailed, integrated_variant_script)
+        sorted_bams_for_validation = sortedbam.map { m,b,bai -> [b,bai] }.flatten().collect()
+        read_validation = VALIDATE_PROTEOGENOMIC_READS(evidence_report.variants, evidence_report.junctions, splice_validation.detailed, arriba_tables_for_validation, sorted_bams_for_validation, refs.gtf, refs.genome, read_validation_script)
+        validation_semantics_doc = file("${projectDir}/PIPELINE_VALIDATION_SEMANTICS.md", checkIfExists:true)
+        final_multiqc_content = PREPARE_FINAL_MULTIQC_CONTENT(
+            complete_findings.report,
+            complete_findings.failure_report,
+            complete_findings.variant_explanations,
+            variant_codon_validation.report,
+            variant_codon_validation.summary,
+            codon_mismatch_analysis.report,
+            codon_mismatch_analysis.summary,
+            integrated_variant_evidence.report,
+            variant_read_provenance.report,
+            variant_read_provenance.summary,
+            evidence_report.report,
+            evidence_report.summary,
+            evidence_report.classification_report,
+            evidence_report.failure_report,
+            read_validation.report,
+            read_validation.summary,
+            validation_semantics_doc,
+            comparative_report.report,
+            comparative_report.multiqc_summary
+        )
+        MULTIQC_FINAL(qc_files, final_multiqc_content.content)
+    } else {
+        MULTIQC_FINAL(qc_files, comparative_multiqc)
     }
 }

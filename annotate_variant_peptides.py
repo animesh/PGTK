@@ -1,12 +1,10 @@
-#wget -c https:/ftp.ensembl.org/pub/release-111/fasta/homo_sapiens/pep/Homo_sapiens.GRCh38.pep.all.fa.gz
-#python annotate_variant_peptides.py --candidates peptide_fasta_mapping.candidates.tsv --vep-vcf /cluster/home/ash022/scripts/pgtk/results/vep/TK12.vep.vcf.gz  /cluster/home/ash022/scripts/pgtk/results/vep/TK13.vep.vcf.gz /cluster/home/ash022/scripts/pgtk/results/vep/TK14.vep.vcf.gz --variant-fasta   /cluster/home/ash022/scripts/pgtk/results/combined_fasta/TK12.exploratory_proteogenomics.fasta        /cluster/home/ash022/scripts/pgtk/results/combined_fasta/TK13.exploratory_proteogenomics.fasta         /cluster/home/ash022/scripts/pgtk/results/combined_fasta/TK14.exploratory_proteogenomics.fasta --ensembl-pep /cluster/home/ash022/scripts/pgtk/Homo_sapiens.GRCh38.pep.all.fa.gz --il-equivalent --output-prefix variant_peptide_annotation
-#tar cvzf variant_peptide_annotation_results.zip.txt variant_peptide_annotation.*
 import argparse
 import csv
 import gzip
 import re
 import sys
 from collections import defaultdict
+from difflib import SequenceMatcher
 from pathlib import Path
 
 
@@ -47,10 +45,10 @@ def strip_version(identifier):
 
 def parse_variant_header(header):
     token = header.split(None, 1)[0]
-    match = re.match(r"^(TK\d+)\|var_([^|]+)$", token, re.I)
+    match = re.match(r"^([^|]+)\|var_([^|]+)$", token, re.I)
     if not match:
         return None
-    sample = match.group(1).upper()
+    sample = match.group(1)
     body = match.group(2)
     # pypgatk format: ._CHROM.POS.REF.ALT_ENST.VERSION_FRAME
     match2 = re.match(r"^\.?_([^._]+)\.(\d+)\.([^._]+)\.([^_]+)_(ENST\d+(?:\.\d+)?)_(\d+)$", body)
@@ -185,6 +183,57 @@ def load_candidates(path):
         return list(reader)
 
 
+
+def find_all(sequence, peptide):
+    starts = []
+    offset = 0
+    while peptide:
+        position = sequence.find(peptide, offset)
+        if position < 0:
+            break
+        starts.append(position)
+        offset = position + 1
+    return starts
+
+
+def validate_event(peptide, peptide_start, alt_seq, ref_seq, csq):
+    if peptide_start < 0:
+        return "PEPTIDE_NOT_FOUND", "peptide is absent from altered protein", "", "", ""
+    pstart = peptide_start
+    pend = pstart + len(peptide)
+    pos_start, pos_end = parse_protein_position(csq.get("Protein_position", ""))
+    amino = (csq.get("Amino_acids") or "").upper()
+    ref_aa, alt_aa = amino.split("/", 1) if "/" in amino else (amino, "")
+    consequences = set(filter(None, (csq.get("Consequence") or "").split("&")))
+    if not ref_seq:
+        return "REFERENCE_PROTEIN_UNAVAILABLE", "reference protein could not be resolved", ref_aa, alt_aa, ""
+    if "missense_variant" in consequences and pos_start == pos_end and len(ref_aa) == len(alt_aa) == 1:
+        if not pos_start or pos_start > len(ref_seq) or pos_start > len(alt_seq):
+            return "PROTEIN_POSITION_MISMATCH", "VEP position outside protein", ref_aa, alt_aa, ""
+        if ref_seq[pos_start - 1] != ref_aa:
+            return "REFERENCE_RESIDUE_MISMATCH", f"expected {ref_aa}; observed {ref_seq[pos_start-1]}", ref_aa, alt_aa, ""
+        if alt_seq[pos_start - 1] != alt_aa:
+            return "ALTERNATE_RESIDUE_MISMATCH", f"expected {alt_aa}; observed {alt_seq[pos_start-1]}", ref_aa, alt_aa, ""
+        if not (pstart <= pos_start - 1 < pend):
+            return "PEPTIDE_DOES_NOT_COVER_EVENT", "peptide does not contain substitution", ref_aa, alt_aa, ""
+        residue = peptide[pos_start - 1 - pstart]
+        if residue != alt_aa:
+            return "ALTERNATE_RESIDUE_MISMATCH", f"peptide residue {residue} != {alt_aa}", ref_aa, alt_aa, residue
+        return "VALIDATED_SUBSTITUTION", "REF, ALT and peptide residues agree", ref_aa, alt_aa, residue
+    changes = [x for x in SequenceMatcher(a=ref_seq,b=alt_seq,autojunk=False).get_opcodes() if x[0] != "equal"]
+    overlap = any((pstart < j2 and pend > j1) or (j1 == j2 and pstart < j1 < pend) for _,i1,i2,j1,j2 in changes)
+    if not overlap:
+        return "PEPTIDE_DOES_NOT_COVER_EVENT", "peptide does not overlap changed protein sequence", ref_aa, alt_aa, ""
+    if peptide in ref_seq:
+        return "PEPTIDE_PRESENT_IN_REFERENCE", "peptide is unchanged in reference protein", ref_aa, alt_aa, ""
+    if "inframe_insertion" in consequences:return "VALIDATED_INFRAME_INSERTION", "peptide overlaps inserted sequence", ref_aa, alt_aa, ""
+    if "inframe_deletion" in consequences:return "VALIDATED_INFRAME_DELETION", "peptide crosses deletion junction", ref_aa, alt_aa, ""
+    if "frameshift_variant" in consequences:return "VALIDATED_FRAMESHIFT_NOVEL_SEQUENCE", "peptide overlaps novel frameshift sequence", ref_aa, alt_aa, ""
+    if "stop_lost" in consequences:return "VALIDATED_STOP_LOSS_EXTENSION", "peptide overlaps novel extension", ref_aa, alt_aa, ""
+    if "stop_gained" in consequences:return "VALIDATED_STOP_GAIN_JUNCTION", "peptide overlaps stop-gain sequence change", ref_aa, alt_aa, ""
+    return "UNSUPPORTED_EVENT_TYPE", csq.get("Consequence", ""), ref_aa, alt_aa, ""
+
+
 def main():
     parser = argparse.ArgumentParser(description="Annotate noncanonical MaxQuant peptides with VEP CSQ and test whether they span encoded protein changes.")
     parser.add_argument("--candidates", required=True)
@@ -223,18 +272,6 @@ def main():
                 if csq is None:
                     unresolved.append((peptide, token, "matching VEP CSQ not found"))
                     continue
-                peptide_start = alt_seq.find(peptide)
-                match_mode = "exact"
-                if peptide_start < 0 and args.il_equivalent:
-                    peptide_start = norm_aa(alt_seq, True).find(norm_aa(peptide, True))
-                    match_mode = "I/L-equivalent"
-                peptide_start_1 = peptide_start + 1 if peptide_start >= 0 else None
-                peptide_end_1 = peptide_start + len(peptide) if peptide_start >= 0 else None
-                protein_start, protein_end = parse_protein_position(csq.get("Protein_position", ""))
-                spans_change = "unknown"
-                if peptide_start_1 is not None and protein_start is not None:
-                    spans_change = "yes" if peptide_start_1 <= protein_end and peptide_end_1 >= protein_start else "no"
-
                 protein_id = csq.get("ENSP", "") or csq.get("Protein", "")
                 ref_seq = ref_by_tx.get(variant["transcript"]) or ref_by_tx.get(variant["transcript_base"])
                 if not ref_seq and protein_id:
@@ -245,7 +282,39 @@ def main():
                     if ref_peptide_exact == "no" and args.il_equivalent and norm_aa(peptide, True) in norm_aa(ref_seq, True):
                         ref_peptide_exact = "I/L-equivalent"
 
+                peptide_starts = find_all(alt_seq, peptide)
+                match_mode = "exact"
+                if not peptide_starts and args.il_equivalent:
+                    peptide_starts = find_all(norm_aa(alt_seq, True), norm_aa(peptide, True))
+                    match_mode = "I/L-equivalent"
+                occurrence_results = [
+                    (start, validate_event(peptide, start, alt_seq, ref_seq, csq))
+                    for start in peptide_starts
+                ] if peptide_starts else [(-1, validate_event(peptide, -1, alt_seq, ref_seq, csq))]
+                validated_occurrences = [
+                    item for item in occurrence_results
+                    if item[1][0].startswith("VALIDATED_")
+                ]
+                if len(validated_occurrences) == 1:
+                    peptide_start, validation_result = validated_occurrences[0]
+                elif len(validated_occurrences) > 1:
+                    peptide_start, validation_result = validated_occurrences[0]
+                    validation_result = (
+                        "AMBIGUOUS_MULTIPLE_OCCURRENCES",
+                        "multiple peptide occurrences independently cover the event",
+                        validation_result[2], validation_result[3], validation_result[4],
+                    )
+                else:
+                    peptide_start, validation_result = occurrence_results[0]
+                peptide_start_1 = peptide_start + 1 if peptide_start >= 0 else None
+                peptide_end_1 = peptide_start + len(peptide) if peptide_start >= 0 else None
+                protein_start, protein_end = parse_protein_position(csq.get("Protein_position", ""))
+                spans_change = "unknown"
+                if peptide_start_1 is not None and protein_start is not None:
+                    spans_change = "yes" if peptide_start_1 <= protein_end and peptide_end_1 >= protein_start else "no"
+
                 consequence = csq.get("Consequence", "")
+                validation_status, validation_reason, expected_ref_aa, expected_alt_aa, peptide_event_residue = validation_result
                 output_rows.append({
                     "Sequence": peptide,
                     "Observed pattern": candidate.get("Observed pattern", ""),
@@ -272,9 +341,20 @@ def main():
                     "Peptide start in variant protein": peptide_start_1 or "",
                     "Peptide end in variant protein": peptide_end_1 or "",
                     "Peptide match mode": match_mode if peptide_start >= 0 else "not-found",
+                    "Peptide occurrence count": len(peptide_starts),
                     "Peptide spans VEP protein position": spans_change,
                     "Peptide found in Ensembl reference protein": ref_peptide_exact,
                     "Reference protein available": "yes" if ref_seq else "no",
+                    "Initial finding": f"Peptide {peptide} associated with {csq.get('HGVSp', '') or variant['chrom'] + ':' + str(variant['pos'])}",
+                    "Validation rule": "Peptide must cover the exact altered sequence; VEP REF/ALT, reference protein, altered protein and peptide residue must agree",
+                    "Observed evidence": f"PEPTIDE={peptide};POSITION={csq.get('Protein_position','')};AMINO_ACIDS={csq.get('Amino_acids','')};PEPTIDE_RANGE={peptide_start_1}-{peptide_end_1};REFERENCE_PRESENCE={ref_peptide_exact}",
+                    "Validation status": validation_status,
+                    "Failure code": "" if validation_status.startswith("VALIDATED_") else validation_status,
+                    "Validation reason": validation_reason,
+                    "Required resolution": "none" if validation_status.startswith("VALIDATED_") else "Association is excluded from validated proteogenomic conclusions; inspect transcript/protein provenance and sequence reconstruction",
+                    "Expected REF amino acid": expected_ref_aa,
+                    "Expected ALT amino acid": expected_alt_aa,
+                    "Peptide residue at event": peptide_event_residue,
                     "Variant FASTA header": variant["header"],
                 })
 
@@ -282,14 +362,16 @@ def main():
         "Sequence", "Observed pattern", "PEP", "Score", "MS/MS Count", "FASTA sample", "FASTA file",
         "Chromosome", "Position", "REF", "ALT", "Transcript", "Protein ID", "Consequence", "IMPACT", "SYMBOL", "Gene",
         "HGVSc", "HGVSp", "Protein position", "Amino acids", "Codons",
-        "Peptide start in variant protein", "Peptide end in variant protein", "Peptide match mode",
-        "Peptide spans VEP protein position", "Peptide found in Ensembl reference protein", "Reference protein available", "Variant FASTA header"
+        "Peptide start in variant protein", "Peptide end in variant protein", "Peptide match mode", "Peptide occurrence count",
+        "Peptide spans VEP protein position", "Peptide found in Ensembl reference protein", "Reference protein available", "Initial finding", "Validation rule", "Observed evidence", "Validation status", "Failure code", "Validation reason", "Required resolution", "Expected REF amino acid", "Expected ALT amino acid", "Peptide residue at event", "Variant FASTA header"
     ]
     prefix = Path(args.output_prefix)
     detailed = prefix.with_suffix(".detailed.tsv")
     prioritized = prefix.with_suffix(".prioritized.tsv")
     summary = prefix.with_suffix(".summary.txt")
     unresolved_path = prefix.with_suffix(".unresolved.tsv")
+    validated_path = prefix.with_suffix(".validated.tsv")
+    rejected_path = prefix.with_suffix(".rejected.tsv")
 
     with detailed.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fields, delimiter="\t", lineterminator="\n")
@@ -300,13 +382,20 @@ def main():
     # PEP, score, PSM-count, or peptide-length threshold is applied here.
     priority_rows = [
         row for row in output_rows
-        if row.get("Peptide spans VEP protein position") == "yes"
+        if row.get("Validation status", "").startswith("VALIDATED_")
         and row.get("Peptide found in Ensembl reference protein") in {"no", "unknown"}
     ]
     priority_rows.sort(key=lambda row: (row["Sequence"], row["FASTA sample"], row["Chromosome"], int(row["Position"]), row["Transcript"]))
     with prioritized.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fields, delimiter="\t", lineterminator="\n")
         writer.writeheader(); writer.writerows(priority_rows)
+
+    validated_rows = [row for row in output_rows if row.get("Validation status", "").startswith("VALIDATED_")]
+    rejected_rows = [row for row in output_rows if not row.get("Validation status", "").startswith("VALIDATED_")]
+    for path, rows in ((validated_path, validated_rows), (rejected_path, rejected_rows)):
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fields, delimiter="\t", lineterminator="\n")
+            writer.writeheader(); writer.writerows(rows)
 
     with unresolved_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")

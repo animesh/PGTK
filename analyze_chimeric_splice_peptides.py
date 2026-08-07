@@ -1,4 +1,3 @@
-#python analyze_chimeric_splice_peptides.py  --peptides ./ftp.pride.ebi.ac.uk/pride/data/archive/2024/11/PXD033510/combined/txt/peptides.txt --canonical-fasta   /cluster/home/ash022/FastaDB/uniprotkb_proteome_UP000005640_2026_06_25.fasta  --fusion-fasta results/fusion_fasta/TK12.fusion_proteins.fasta       results/fusion_fasta/TK13.fusion_proteins.fasta results/fusion_fasta/TK14.fusion_proteins.fasta  --splice-fasta       results/splice_fasta/TK12.splice_proteins.fasta results/splice_fasta/TK13.splice_proteins.fasta results/splice_fasta/TK14.splice_proteins.fasta  --arriba       results/fusions/TK12.fusions.tsv results/fusions/TK13.fusions.tsv results/fusions/TK14.fusions.tsv  --group-map 2=TK12  --group-map 3=TK13  --group-map 4=TK14  --output-prefix junction_peptide_analysis
 import argparse
 import csv
 import gzip
@@ -44,7 +43,7 @@ def parse_fasta(path):
 
 
 def sample_from_header(header):
-    match = re.match(r"^(TK\d+)\|", header, flags=re.IGNORECASE)
+    match = re.match(r"^([^|]+)\|", header)
     return match.group(1).upper() if match else ""
 
 
@@ -206,9 +205,13 @@ def parse_arriba(paths):
 def peptide_matches(peptide_norm, proteins):
     matches = []
     for protein in proteins:
-        start = protein["normalized"].find(peptide_norm)
-        if start >= 0:
+        offset = 0
+        while peptide_norm:
+            start = protein["normalized"].find(peptide_norm, offset)
+            if start < 0:
+                break
             matches.append((protein, start + 1))
+            offset = start + 1
     return matches
 
 
@@ -386,7 +389,7 @@ def main():
             and len(row["Sequence"]) >= 8
         )
 
-    fusion_candidates = [row for row in fusion_rows if is_high_confidence(row)]
+    fusion_candidates = [row for row in fusion_rows if is_high_confidence(row) and row["Junction inference"] == "split-anchor-supported" and row["Arriba breakpoint1"] and row["Arriba breakpoint2"]]
     splice_candidates = [row for row in splice_rows if is_high_confidence(row)]
     inferred_fusion = [row for row in fusion_candidates if row["Junction inference"] == "split-anchor-supported"]
     inferred_splice = [row for row in splice_candidates if row["Junction inference"] == "split-anchor-supported"]
