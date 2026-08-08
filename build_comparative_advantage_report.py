@@ -90,9 +90,10 @@ def main():
 
     comp=[]
     for path in a.external_comparison:
-        for row in table_rows(path): comp.append([sample_from(path),row.get('Metric',''),row.get('Value','')])
+        for row in table_rows(path):
+            comp.append([row.get('Sample') or sample_from(path),row.get('Stage',''),row.get('Metric',''),row.get('Value','')])
     with open(a.output_prefix+'.external_caller_comparison.tsv','w',newline='') as h:
-        w=csv.writer(h,delimiter='\t',lineterminator='\n');w.writerow(['Sample','Metric','Value']);w.writerows(comp)
+        w=csv.writer(h,delimiter='\t',lineterminator='\n');w.writerow(['Sample','Stage','Metric','Value']);w.writerows(comp)
 
     progression=[r for r in vcf_rows if r[1]=='progression_nonbaseline_only']
     baseline_by_tk=defaultdict(list)
@@ -114,8 +115,9 @@ def main():
     overview += ['', '## Progression outputs','']
     overview += [f'- {r[0]}: {r[4]} non-baseline-only alleles ({r[5]} SNPs, {r[6]} indels)' for r in progression] or ['- No progression VCF was generated.']
     overview += ['', '## External caller comparison','']
-    for sample in sorted({x[0] for x in comp}):
-        vals={m:v for s,m,v in comp if s==sample}; overview.append(f"- {sample}: shared={vals.get('Shared','NA')}, PGTK overlap={vals.get('PGTK overlap %','NA')}%, genotype concordance={vals.get('Genotype concordance %','NA')}%")
+    for sample,stage in sorted({(x[0],x[1]) for x in comp}):
+        vals={metric:value for s,st,metric,value in comp if s==sample and st==stage}
+        overview.append(f"- {sample} [{stage}]: shared={vals.get('Shared','NA')}, PGTK overlap={vals.get('PGTK overlap %','NA')}%, genotype concordance={vals.get('Genotype concordance %','NA')}%")
     if not comp:overview.append('- No external caller folder was supplied.')
     Path(a.output_prefix+'.report.md').write_text('\n'.join(overview)+'\n',encoding='utf-8')
 

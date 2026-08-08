@@ -2,6 +2,7 @@
 import argparse
 import csv
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -70,6 +71,8 @@ def main():
     parser.add_argument('--work-dir', required=True, type=Path)
     parser.add_argument('--tmp-root', required=True, type=Path)
     parser.add_argument('--results-dir', required=True, type=Path)
+    parser.add_argument('--host-python', required=True, type=Path)
+    parser.add_argument('--apptainer', required=True, type=Path)
     args = parser.parse_args()
 
     require_directory(args.project_dir, 'project directory')
@@ -85,8 +88,24 @@ def main():
     require_file(args.ensembl_pep, 'Ensembl peptide FASTA')
     for name in LOCAL_CONTAINER_FILES:
         require_file(args.container_cache / name, 'local container image')
+    require_file(args.host_python, 'host Python executable')
+    require_file(args.apptainer, 'Apptainer executable')
+    if not os.access(args.host_python, os.X_OK):
+        raise ValueError(f'host Python is not executable: {args.host_python}')
+    if not os.access(args.apptainer, os.X_OK):
+        raise ValueError(f'Apptainer is not executable: {args.apptainer}')
+    samtools_images = sorted(args.container_cache.rglob('*samtools-1.21*img'))
+    if len(samtools_images) != 1:
+        raise ValueError(f'expected exactly one samtools 1.21 image below {args.container_cache}; found {len(samtools_images)}')
+    host_python_real = args.host_python.resolve()
+    host_python_root = host_python_real.parent.parent
+    bind_paths = f'{args.project_dir},{args.reference_downloads},{args.container_cache},{host_python_root}'
+    base = [str(args.apptainer), 'exec', '--no-home', '--pid', '-B', bind_paths, str(samtools_images[0])]
+    subprocess.run(base + [str(host_python_real), '-c', 'import csv,gzip,subprocess,xml.etree.ElementTree; print("HOST_PYTHON_OK")'], check=True)
+    subprocess.run(base + ['samtools', '--version'], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(base + [str(host_python_real), str(args.project_dir / 'build_igv_evidence_bundle.py'), '--help'], check=True, stdout=subprocess.DEVNULL)
     validate_samples(args.samplesheet, args.sra_dir)
-    print('PASS: runtime references, containers, SRA inputs, samplesheet and writable directories')
+    print('PASS: runtime references, containers, SRA inputs, samplesheet, host Python and samtools/Python process contract')
 
 if __name__ == '__main__':
     try:

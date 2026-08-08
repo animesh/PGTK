@@ -540,7 +540,7 @@ process VARIANT_STAGE_QC {
 }
 
 process COMPARE_EXTERNAL_VCF {
-    tag "${meta.sample}:external_vcf_comparison"
+    tag "${meta.sample}:${meta.comparison_stage}:external_vcf_comparison"
     cpus 1; memory '4 GB'; time '4h'; disk '30 GB'
     container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
     publishDir "${params.outdir}/comparison/external_vcf", mode:'copy'
@@ -548,14 +548,14 @@ process COMPARE_EXTERNAL_VCF {
     tuple val(meta), path(pgtk_vcf), path(pgtk_tbi), path(external_vcf)
     path script_file
     output:
-    path "${meta.sample}.external_comparison.summary.tsv", emit: summary
-    path "${meta.sample}.external_comparison.shared.tsv", emit: shared
-    path "${meta.sample}.external_comparison.pgtk_only.tsv", emit: pgtk_only
-    path "${meta.sample}.external_comparison.external_only.tsv", emit: external_only
-    path "${meta.sample}.external_comparison.report.md", emit: report
+    path "${meta.sample}.${meta.comparison_stage}.external_comparison.summary.tsv", emit: summary
+    path "${meta.sample}.${meta.comparison_stage}.external_comparison.shared.tsv", emit: shared
+    path "${meta.sample}.${meta.comparison_stage}.external_comparison.pgtk_only.tsv", emit: pgtk_only
+    path "${meta.sample}.${meta.comparison_stage}.external_comparison.external_only.tsv", emit: external_only
+    path "${meta.sample}.${meta.comparison_stage}.external_comparison.report.md", emit: report
     script:
     """
-    python ${script_file} --sample ${meta.sample} --pgtk ${pgtk_vcf} --external ${external_vcf} --output-prefix ${meta.sample}.external_comparison
+    python ${script_file} --sample ${meta.sample} --stage ${meta.comparison_stage} --pgtk ${pgtk_vcf} --external ${external_vcf} --output-prefix ${meta.sample}.${meta.comparison_stage}.external_comparison
     """
 }
 
@@ -1067,6 +1067,7 @@ process BUILD_IGV_EVIDENCE_BUNDLE {
     output:
     path 'pgtk_igv.events.tsv', emit: events
     path 'pgtk_igv.events.bed', emit: bed
+    path 'pgtk_igv.events.bedpe', emit: bedpe
     path 'pgtk_igv.sample_manifest.tsv', emit: manifest
     path 'pgtk_igv.igv.batch.txt', emit: batch
     path 'pgtk_igv.igv.session.xml', emit: session
@@ -1075,7 +1076,7 @@ process BUILD_IGV_EVIDENCE_BUNDLE {
     script:
     def bamArgs=sorted_bams.findAll { it.name.endsWith('.bam') }.collect { bam -> "--bam ${bam.baseName.tokenize('.')[0]}=${bam}" }.join(' ')
     """
-    python ${bundle_script} --genome ${genome} --rna-vcf ${rna_vcfs} --progression-vcf ${progression_vcfs} --fusion-table ${fusion_tables} --splice-table ${splice_tables} ${bamArgs} --padding ${params.read_validation_padding} --output-prefix pgtk_igv
+    "${params.host_python}" ${bundle_script} --genome ${genome} --rna-vcf ${rna_vcfs} --progression-vcf ${progression_vcfs} --fusion-table ${fusion_tables} --splice-table ${splice_tables} ${bamArgs} --padding ${params.read_validation_padding} --output-prefix pgtk_igv
     """
 }
 
@@ -1724,7 +1725,19 @@ workflow {
     if (params.run_external_vcf_comparison) {
         if (!params.external_vcf_dir) error '--external_vcf_dir is required when --run_external_vcf_comparison true'
         comparison_script=file("${projectDir}/compare_external_vcf.py", checkIfExists:true)
-        external_inputs=genotype_result.raw.map { m,v,tbi -> tuple(m,v,tbi,resolveExternalVcf(params.external_vcf_dir.toString(),m.srr,params.external_vcf_suffix.toString())) }
+        external_raw_inputs=genotype_result.raw.map { m,v,tbi ->
+            def comparisonMeta = m + [comparison_stage:'raw']
+            tuple(comparisonMeta,v,tbi,resolveExternalVcf(params.external_vcf_dir.toString(),m.srr,params.external_vcf_suffix.toString()))
+        }
+        external_pass_inputs=genotype_result.pass.map { m,v,tbi ->
+            def comparisonMeta = m + [comparison_stage:'pass']
+            tuple(comparisonMeta,v,tbi,resolveExternalVcf(params.external_vcf_dir.toString(),m.srr,params.external_vcf_suffix.toString()))
+        }
+        external_rna_inputs=validated_variants.validated.map { m,v,tbi ->
+            def comparisonMeta = m + [comparison_stage:'rna_validated']
+            tuple(comparisonMeta,v,tbi,resolveExternalVcf(params.external_vcf_dir.toString(),m.srr,params.external_vcf_suffix.toString()))
+        }
+        external_inputs=external_raw_inputs.mix(external_pass_inputs,external_rna_inputs)
         external_comparison_result=COMPARE_EXTERNAL_VCF(external_inputs,comparison_script)
         external_comparison_tables = external_comparison_result.summary.collect()
     }

@@ -292,7 +292,7 @@ Reports include:
 - genotype concordance
 - discordant-call coordinates for review
 
-The comparison distinguishes PGTK raw, PASS, and RNA-validated stages.
+The comparison runs separately for PGTK raw, PASS, and RNA-validated stages.
 
 ## Optional MaxQuant validation
 
@@ -468,7 +468,7 @@ MarkDuplicates:                 2 CPUs, 48 GB
 SplitNCigarReads:               2 CPUs, 24 GB
 ```
 
-The retry policy allows three total attempts:
+Resource-related failures with exit codes 137, 140, or 143 allow three total attempts. Deterministic command and configuration failures terminate immediately:
 
 ```text
 Attempt 1: 1x initial resources

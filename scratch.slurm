@@ -178,7 +178,9 @@ export APPTAINER_BINDPATH="${APPTAINER_BINDPATH:+$APPTAINER_BINDPATH,}$RUNTIME_B
     --ensembl-pep "$ENSEMBL_PEP" \
     --work-dir "$WORK_DIR" \
     --tmp-root "$TMP_ROOT" \
-    --results-dir "$RESULTS_DIR" || die 'runtime input validation failed'
+    --results-dir "$RESULTS_DIR" \
+    --host-python "$HOST_PYTHON" \
+    --apptainer "$APPTAINER" || die 'runtime input validation failed'
 
 printf 'Job: %s\nProject: %s\nWork: %s\nTemporary: %s\nProfile: %s\nNormal partition: %s\nBigmem partition: %s\nThresholds: CPU>%s or memory>%sGB\nCaps: CPU=%s memory=%sGB\n' \
     "$JOB_ID" "$PROJECT_DIR" "$WORK_DIR" "$RUN_TMP" "$PROFILE" "$NORMAL_PARTITION" "$BIGMEM_PARTITION" "$NORMAL_CPU_THRESHOLD" "$NORMAL_MEMORY_THRESHOLD_GB" "$MAX_CPUS" "$MAX_MEMORY_GB"

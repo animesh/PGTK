@@ -22,7 +22,8 @@ assert 'pgtkAbsoluteNormalCpuThreshold = 20' in config
 assert 'pgtkAbsoluteNormalMemoryThresholdGb = 160' in config
 assert 'pgtkAbsoluteMaxCpus = 32' in config
 assert 'pgtkAbsoluteMaxMemoryGb = 512' in config
-assert 'maxRetries = 2' in config and "errorStrategy = 'retry'" in config
+assert 'maxRetries = 2' in config
+assert "task.exitStatus in [137, 140, 143] ? 'retry' : 'terminate'" in config
 assert not re.search(r"queue\s*=\s*'(normal|bigmem)'",config)
 assert not re.search(r"queue\s+'(normal|bigmem)'",main)
 assert '#SBATCH --account=nn9036k' in slurm
@@ -41,6 +42,9 @@ for required in [
 assert 'PIPELINE_ARGS=("$@")' in slurm
 assert 'trap finalize EXIT' in slurm
 assert '--host_python "$HOST_PYTHON"' in slurm
+assert '--host-python "$HOST_PYTHON"' in slurm
+assert '--apptainer "$APPTAINER"' in slurm
+assert '"${params.host_python}" ${bundle_script}' in main
 
 def allocation(base_cpu,base_mem,attempt,cpu_scales):
     multiplier=1 << (attempt-1)
@@ -66,3 +70,12 @@ for process in ['HAPLOTYPE_CALLER','STAR_ALIGN','STAR_INDEX','SORT_INDEX_BAM']:
     block=config.split(f'withName: {process} {{',1)[1].split('\n            }',1)[0]
     assert 'cpus = { Math.min' in block, process
 print('PASS: dynamic partition routing, retry scaling, caps and CLI-only wrapper configuration')
+python_script_variables = ('${validator}', '${validation_script}', '${bundle_script}')
+for match in re.finditer(r'^process\s+(\w+)\s*\{', main, re.M):
+    process = match.group(1)
+    following = re.search(r'^process\s+\w+\s*\{', main[match.end():], re.M)
+    end = match.end() + following.start() if following else len(main)
+    block = main[match.start():end]
+    if 'samtools:1.21' in block and any(variable in block for variable in python_script_variables):
+        assert '${params.host_python}' in block, f'{process} uses a Python script in the samtools container without host Python'
+print('PASS: samtools-container Python consumers use configured host Python')

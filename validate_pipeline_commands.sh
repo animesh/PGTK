@@ -19,7 +19,7 @@ fail(){ FAIL=$((FAIL+1)); printf 'FAIL  %s\n' "$*"; }
 need(){ [[ -s $1 ]] && pass "File: $1" || fail "Missing or empty: $1"; }
 has(){ grep -Fq -- "$2" "$1" && pass "$3" || fail "$3: missing $2"; }
 lacks(){ grep -Fq -- "$2" "$1" && fail "$3: forbidden $2" || pass "$3"; }
-FILES=(main.nf nextflow.config scratch.slurm samples.csv collect_pipeline_failures.py analyze_pipeline_trace.py test_resource_configuration.py validate_rna_events.py build_complete_report.py map_peptides_to_fasta.py annotate_variant_peptides.py analyze_chimeric_splice_peptides.py validate_splice_junction_peptides.py proteogenomics_evidence_report.py validate_proteogenomic_reads.py validate_variant_read_provenance.py validate_variant_codons.py merge_variant_validation.py analyze_codon_mismatches.py build_integrated_variant_evidence.py PIPELINE_VALIDATION_SEMANTICS.md RESOURCE_CALIBRATION.md RESOURCE_RETRY_MATRIX.tsv HISTORY_REGRESSION_CHECKLIST.md maxquant_raw_file_map.none.tsv audit_environment_hardcoding.py validate_runtime_inputs.py validate_haplotype_shards.py summarize_variant_stages.py compare_external_vcf.py build_comparative_advantage_report.py build_igv_evidence_bundle.py)
+FILES=(main.nf nextflow.config scratch.slurm samples.csv collect_pipeline_failures.py analyze_pipeline_trace.py test_resource_configuration.py validate_rna_events.py build_complete_report.py map_peptides_to_fasta.py annotate_variant_peptides.py analyze_chimeric_splice_peptides.py validate_splice_junction_peptides.py proteogenomics_evidence_report.py validate_proteogenomic_reads.py validate_variant_read_provenance.py validate_variant_codons.py merge_variant_validation.py analyze_codon_mismatches.py build_integrated_variant_evidence.py PIPELINE_VALIDATION_SEMANTICS.md RESOURCE_CALIBRATION.md RESOURCE_RETRY_MATRIX.tsv HISTORY_REGRESSION_CHECKLIST.md maxquant_raw_file_map.none.tsv audit_environment_hardcoding.py validate_runtime_inputs.py validate_haplotype_shards.py summarize_variant_stages.py compare_external_vcf.py build_comparative_advantage_report.py build_igv_evidence_bundle.py test_igv_evidence_bundle.py)
 for file in "${FILES[@]}"; do need "$PROJECT_DIR/$file"; done
 for file in "$PROJECT_DIR"/*.py; do python -m py_compile "$file" && pass "Python syntax: $(basename "$file")" || fail "Python syntax: $(basename "$file")"; done
 bash -n "$PROJECT_DIR/scratch.slurm" && pass 'scratch.slurm syntax' || fail 'scratch.slurm syntax'
@@ -41,6 +41,7 @@ has "$MAIN_NF" 'process VARIANT_STAGE_QC {' 'Variant stage QC wired'
 has "$MAIN_NF" 'process COMPARE_EXTERNAL_VCF {' 'External VCF comparison wired'
 has "$MAIN_NF" 'process BUILD_COMPARATIVE_ADVANTAGE_REPORT {' 'Comparative biological report wired'
 has "$MAIN_NF" 'process BUILD_IGV_EVIDENCE_BUNDLE {' 'RNA and progression IGV bundle wired'
+has "$MAIN_NF" '"${params.host_python}" ${bundle_script}' 'IGV bundle uses configured host Python inside samtools container'
 has "$MAIN_NF" 'process PREPARE_COMPARATIVE_MULTIQC_CONTENT {' 'Comparative MultiQC content wired'
 has "$MAIN_NF" 'shared_with_baseline.vep.vcf.gz' 'Shared baseline subtraction VCF wired'
 has "$MAIN_NF" 'txtMQMBR' 'Default MaxQuant results folder wired'
@@ -68,6 +69,7 @@ has "$PROJECT_DIR/nextflow.config" 'pgtkAbsoluteMaxMemoryGb = 512' 'Absolute mem
 has "$PROJECT_DIR/nextflow.config" 'pgtkAbsoluteNormalCpuThreshold = 20' 'Normal-partition CPU ceiling'
 has "$PROJECT_DIR/nextflow.config" 'pgtkAbsoluteNormalMemoryThresholdGb = 160' 'Normal-partition memory ceiling'
 has "$PROJECT_DIR/nextflow.config" 'maxRetries = 2' 'Three total attempts configured'
+has "$PROJECT_DIR/nextflow.config" "task.exitStatus in [137, 140, 143] ? 'retry' : 'terminate'" 'Only resource-related exit codes are retried'
 lacks "$PROJECT_DIR/nextflow.config" "queue = 'normal'" 'No fixed global partition'
 lacks "$PROJECT_DIR/nextflow.config" "queue = 'bigmem'" 'No fixed bigmem partition'
 has "$PROJECT_DIR/scratch.slurm" '#SBATCH --account=nn9036k' 'Default Saga account directive'
@@ -87,6 +89,24 @@ has "$MAIN_NF" 'ParallelGCThreads=${javaGcThreads}' 'MarkDuplicates GC threads f
 has "$PROJECT_DIR/nextflow.config" 'withName: SPLIT_N_CIGAR {' 'SplitNCigarReads resource selector present'
 python "$PROJECT_DIR/audit_environment_hardcoding.py" "$PROJECT_DIR" && pass 'No environment-specific hard-coding' || fail 'Environment-specific hard-coding audit'
 python "$PROJECT_DIR/test_resource_configuration.py" && pass 'Resource and wrapper fixtures' || fail 'Resource and wrapper fixtures'
+python "$PROJECT_DIR/test_igv_evidence_bundle.py" && pass 'IGV evidence fixture' || fail 'IGV evidence fixture'
+TMP_COMPARE=$(mktemp -d)
+cat > "$TMP_COMPARE/pgtk.vcf" <<'VCF'
+##fileformat=VCFv4.2
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	SAMPLE
+1	10	.	A	G	.	PASS	.	GT	0/1
+1	20	.	C	T	.	PASS	.	GT	1/1
+VCF
+cat > "$TMP_COMPARE/external.vcf" <<'VCF'
+##fileformat=VCFv4.2
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	SAMPLE
+chr1	10	.	A	G	.	PASS	.	GT	0/1
+chr1	30	.	G	A	.	PASS	.	GT	0/1
+VCF
+python "$PROJECT_DIR/compare_external_vcf.py" --sample fixture --stage raw --pgtk "$TMP_COMPARE/pgtk.vcf" --external "$TMP_COMPARE/external.vcf" --output-prefix "$TMP_COMPARE/comparison" >/dev/null 2>&1 \
+    && [[ -s "$TMP_COMPARE/comparison.summary.tsv" && -s "$TMP_COMPARE/comparison.shared.tsv" && -s "$TMP_COMPARE/comparison.pgtk_only.tsv" && -s "$TMP_COMPARE/comparison.external_only.tsv" && -s "$TMP_COMPARE/comparison.report.md" ]] \
+    && pass 'External comparison output contract fixture' || fail 'External comparison output contract fixture'
+rm -rf "$TMP_COMPARE"
 if [[ -x $NEXTFLOW ]]; then
     PGTK_ACCOUNT=validation PGTK_NORMAL_PARTITION=normal PGTK_BIGMEM_PARTITION=bigmem PGTK_NORMAL_CPU_THRESHOLD=20 PGTK_NORMAL_MEMORY_THRESHOLD_GB=160 PGTK_MAX_CPUS=32 PGTK_MAX_MEMORY_GB=512 PGTK_QUEUE_SIZE=200 PGTK_SUBMIT_RATE_LIMIT=60/1min \
         "$NEXTFLOW" inspect "$MAIN_NF" >/tmp/pgtk_dynamic_inspect.txt 2>&1 \
