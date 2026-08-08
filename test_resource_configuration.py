@@ -5,10 +5,11 @@ root=Path(__file__).resolve().parent
 main=(root/'main.nf').read_text()
 config=(root/'nextflow.config').read_text()
 slurm=(root/'scratch.slurm').read_text()
+assets=(root/'download_assets.sh').read_text()
 processes=re.findall(r'^process\s+(\w+)\s*\{',main,re.M)
 robust=config.split('    robust {',1)[1].rsplit('\n    }\n}',1)[0]
 selectors=re.findall(r'withName:\s*(\w+)\s*\{',robust)
-assert len(processes)==53 and len(set(processes))==53
+assert len(processes)==57 and len(set(processes))==57
 assert set(processes)==set(selectors),(set(processes)-set(selectors),set(selectors)-set(processes))
 assert "queue = {" in config
 assert 'task.cpus > pgtkEffectiveNormalCpuThreshold || task.memory > pgtkEffectiveNormalMemoryThresholdGb.GB' in config
@@ -40,6 +41,13 @@ for required in [
 ]:
     assert required in slurm, required
 assert 'PIPELINE_ARGS=("$@")' in slurm
+
+assert 'go-basic.obo' in assets
+assert 'goa_human.gaf.gz' in assets
+assert 'validate_obo()' in assets
+assert 'validate_gaf_gzip()' in assets
+assert 'downloaded_assets.sha256' in assets
+assert 'DEFAULT_CATEGORIES' not in (root/'analyze_progression_biology.py').read_text()
 assert 'trap finalize EXIT' in slurm
 assert '--host_python "$HOST_PYTHON"' in slurm
 assert '--host-python "$HOST_PYTHON"' in slurm
