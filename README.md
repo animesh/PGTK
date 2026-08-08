@@ -4,6 +4,25 @@ PGTK is a Nextflow DSL2 workflow for exploratory RNA-seq proteogenomics. It proc
 
 The workflow is designed for research use. RNA-derived variant calls may include germline, clonal, progression-associated, RNA-editing, alignment, and technical events. They must not be interpreted as clinically validated somatic variants without independent evidence.
 
+
+## Quick start
+
+```
+#Check the (scratch.slurm)[scratch.slurm] and set location appropritately then
+sbatch scratch.slurm
+#count variants in results folder
+for i in results/*/*.fasta ; do echo $i;  awk -F '|' '{print $2}' $i | awk -F '.' '{print $1}' | sort | uniq -c ; done
+#compare with sarek
+sbatch scratch.slurm -- \
+  --run_external_vcf_comparison true \
+  --external_vcf_dir sarek \
+  --external_vcf_suffix .haplotypecaller.vcf.gz
+#map to maxquant
+sbatch scratch.slurm -- \
+  --run_map_maxquant true \
+  --external_maxquant_dir txt \
+```
+
 ## Current validated implementation
 
 The current workflow has:

@@ -34,6 +34,10 @@ params.external_vcf_suffix = '.haplotypecaller.vcf.gz'
 params.host_python = null
 params.reference_downloads = null
 params.container_cache = null
+params.go_obo = "${projectDir}/reference_downloads/go-basic.obo"
+params.go_gaf = "${projectDir}/reference_downloads/goa_human.gaf.gz"
+params.go_min_size = 10
+params.go_max_size = 500
 
 
 def resolveExternalVcf(String directory, String srr, String suffix) {
@@ -1051,6 +1055,81 @@ process PROGRESSION_SUBTRACT {
     """
 }
 
+process PREPARE_GO_ANNOTATIONS {
+    tag 'GO_annotations'
+    cpus 1; memory '4 GB'; time '4h'; disk '20 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/progression_biology/go_reference", mode:'copy'
+    input: path go_obo; path go_gaf; path preparation_script
+    output:
+    path 'go_annotations.mapping.tsv', emit: mapping
+    path 'go_annotations.metadata.tsv', emit: metadata
+    script:
+    """
+    set -euo pipefail
+    python ${preparation_script} --obo ${go_obo} --gaf ${go_gaf} --output-prefix go_annotations
+    """
+}
+process ANALYZE_PROGRESSION_SAMPLE {
+    tag "${meta.sample}:GO_progression"
+    cpus 1; memory '4 GB'; time '4h'; disk '30 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/progression_biology/samples", mode:'copy'
+    input:
+    tuple val(meta), path(progression_vcf), path(progression_tbi), path(background_vcf), path(background_tbi)
+    path go_mapping
+    path analysis_script
+    output:
+    tuple val(meta), path("${meta.sample}.progression_biology.alleles.tsv"), path("${meta.sample}.progression_biology.genes.tsv"), path("${meta.sample}.progression_biology.go_enrichment.tsv"), path("${meta.sample}.progression_biology.candidates.tsv"), path("${meta.sample}.progression_biology.summary.tsv")
+    script:
+    """
+    set -euo pipefail
+    python ${analysis_script} --sample ${meta.sample} --subject ${meta.tk} --group ${meta.group} --progression-vcf ${progression_vcf} --background-vcf ${background_vcf} --go-mapping ${go_mapping} --go-min-size ${params.go_min_size} --go-max-size ${params.go_max_size} --output-prefix ${meta.sample}.progression_biology
+    """
+}
+process COMPARE_PROGRESSION_PAIR {
+    tag "${pair_meta.subject}:${pair_meta.sample_a}_vs_${pair_meta.sample_b}:GO"
+    cpus 1; memory '2 GB'; time '2h'; disk '20 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/progression_biology/pairs", mode:'copy'
+    input:
+    tuple val(pair_meta), path(alleles_a), path(genes_a), path(go_a), path(alleles_b), path(genes_b), path(go_b)
+    path comparison_script
+    output:
+    tuple val(pair_meta), path("${pair_meta.pair_id}.progression_pair.alleles.tsv"), path("${pair_meta.pair_id}.progression_pair.genes.tsv"), path("${pair_meta.pair_id}.progression_pair.go_contrasts.tsv"), path("${pair_meta.pair_id}.progression_pair.summary.tsv")
+    script:
+    """
+    set -euo pipefail
+    python ${comparison_script} --subject ${pair_meta.subject} --sample-a ${pair_meta.sample_a} --sample-b ${pair_meta.sample_b} --alleles-a ${alleles_a} --alleles-b ${alleles_b} --genes-a ${genes_a} --genes-b ${genes_b} --go-a ${go_a} --go-b ${go_b} --output-prefix ${pair_meta.pair_id}.progression_pair
+    """
+}
+process MERGE_PROGRESSION_BIOLOGY {
+    tag 'merge_GO_progression_biology'
+    cpus 1; memory '4 GB'; time '4h'; disk '50 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/progression_biology", mode:'copy'
+    input:
+    path sample_alleles; path sample_genes; path sample_go; path sample_candidates; path sample_summaries
+    path pair_alleles; path pair_genes; path pair_go; path pair_summaries
+    path go_metadata; path merge_script
+    output:
+    path 'progression_biology.progression_alleles.tsv', emit: alleles
+    path 'progression_biology.progression_genes.tsv', emit: genes
+    path 'progression_biology.go_enrichment.tsv', emit: enrichment
+    path 'progression_biology.pairwise_allele_contrasts.tsv', emit: pairwise_alleles
+    path 'progression_biology.pairwise_gene_contrasts.tsv', emit: pairwise_genes
+    path 'progression_biology.pairwise_go_contrasts.tsv', emit: pairwise_categories
+    path 'progression_biology.pairwise_summary.tsv', emit: pairwise_summary
+    path 'progression_biology.candidate_priority.tsv', emit: candidates
+    path 'progression_biology.multiqc_summary.tsv', emit: multiqc_summary
+    path 'progression_biology.go_metadata.tsv', emit: go_metadata_output
+    path 'progression_biology.report.md', emit: report
+    script:
+    """
+    set -euo pipefail
+    python ${merge_script} --sample-alleles ${sample_alleles} --sample-genes ${sample_genes} --sample-go ${sample_go} --sample-candidates ${sample_candidates} --sample-summary ${sample_summaries} --pair-alleles ${pair_alleles} --pair-genes ${pair_genes} --pair-go ${pair_go} --pair-summary ${pair_summaries} --go-metadata ${go_metadata} --output-prefix progression_biology
+    """
+}
 process BUILD_IGV_EVIDENCE_BUNDLE {
     tag 'all_rna_progression_igv'
     cpus 2; memory '8 GB'; time '24h'; disk '300 GB'
@@ -1126,6 +1205,10 @@ process PREPARE_COMPARATIVE_MULTIQC_CONTENT {
     path rna_inventory
     path external_comparison
     path summary
+    path progression_report
+    path progression_summary
+    path progression_enrichment
+    path progression_pairwise_categories
     output: path 'comparative_multiqc_content'
     script:
     """
@@ -1135,10 +1218,17 @@ process PREPARE_COMPARATIVE_MULTIQC_CONTENT {
     cp ${rna_inventory} comparative_multiqc_content/rna_event_inventory_mqc.tsv
     cp ${external_comparison} comparative_multiqc_content/external_caller_comparison_mqc.tsv
     cp ${summary} comparative_multiqc_content/advantage_summary_mqc.tsv
-    python - ${report} <<'PY_MQC'
+    cp ${progression_summary} comparative_multiqc_content/progression_biology_summary_mqc.tsv
+    cp ${progression_enrichment} comparative_multiqc_content/progression_go_enrichment_mqc.tsv
+    cp ${progression_pairwise_categories} comparative_multiqc_content/progression_pairwise_go_contrasts_mqc.tsv
+    python - ${report} ${progression_report} <<'PY_MQC'
 import html,pathlib,sys
-text=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8',errors='replace')
-pathlib.Path('comparative_multiqc_content/18_comparative_biological_advantage_mqc.html').write_text('<h2>Comparative biological advantage</h2><pre style="white-space:pre-wrap">'+html.escape(text)+'</pre>',encoding='utf-8')
+for source,filename,title in [
+    (sys.argv[1],'18_comparative_biological_advantage_mqc.html','Comparative biological advantage'),
+    (sys.argv[2],'20_progression_biology_mqc.html','Progression biology and scalable sample contrasts'),
+]:
+    text=pathlib.Path(source).read_text(encoding='utf-8',errors='replace')
+    pathlib.Path('comparative_multiqc_content',filename).write_text('<h2>'+html.escape(title)+'</h2><pre style="white-space:pre-wrap">'+html.escape(text)+'</pre>',encoding='utf-8')
 PY_MQC
     """
 }
@@ -1562,6 +1652,8 @@ process PREPARE_FINAL_MULTIQC_CONTENT {
     path validation_semantics
     path comparative_report
     path comparative_summary
+    path progression_biology_report
+    path progression_biology_summary
     output:
     path 'multiqc_custom_content', emit: content
     script:
@@ -1587,7 +1679,9 @@ process PREPARE_FINAL_MULTIQC_CONTENT {
       ${read_validation_summary} \\
       ${validation_semantics} \
       ${comparative_report} \
-      ${comparative_summary} <<'PY_MQC'
+      ${comparative_summary} \
+      ${progression_biology_report} \
+      ${progression_biology_summary} <<'PY_MQC'
 import html
 import pathlib
 import sys
@@ -1611,6 +1705,8 @@ names = [
     ('17_validation_semantics_mqc.html','Validation statuses and failure-category semantics'),
     ('18_comparative_biological_advantage_mqc.html','Comparative biological advantage'),
     ('19_comparative_advantage_summary_mqc.html','Comparative advantage summary'),
+    ('20_progression_biology_mqc.html','Progression biology and scalable sample contrasts'),
+    ('21_progression_biology_summary_mqc.html','Progression biology summary'),
 ]
 if len(sys.argv[1:]) != len(names):
     raise SystemExit(f'Expected {len(names)} report inputs, received {len(sys.argv[1:])}')
@@ -1767,7 +1863,24 @@ workflow {
     bases=groups.baseline.map { m,v,t -> tuple(m.tk,v,t) }
     pairs=groups.progression.map { m,v,t -> tuple(m.tk,m,v,t) }.combine(bases,by:0).map { k,m,pv,pt,bv,bt -> tuple(m,pv,pt,bv,bt) }
     prog=PROGRESSION_SUBTRACT(pairs)
-
+    if (!params.go_obo) error '--go_obo is required for unbiased GO enrichment'
+    if (!params.go_gaf) error '--go_gaf is required for unbiased GO enrichment'
+    go_preparation_script=file("${projectDir}/prepare_go_annotations.py", checkIfExists:true)
+    progression_biology_script=file("${projectDir}/analyze_progression_biology.py", checkIfExists:true)
+    progression_pair_script=file("${projectDir}/compare_progression_pair.py", checkIfExists:true)
+    progression_merge_script=file("${projectDir}/merge_progression_biology.py", checkIfExists:true)
+    go_reference=PREPARE_GO_ANNOTATIONS(file(params.go_obo,checkIfExists:true),file(params.go_gaf,checkIfExists:true),go_preparation_script)
+    progression_sample_inputs=prog.map { m,nv,nt,bv,bt,sv,st,su -> tuple(m.sample,m,nv,nt) }.join(validated_variants.validated.map { m,v,t -> tuple(m.sample,v,t) }).map { sample,m,nv,nt,rv,rt -> tuple(m,nv,nt,rv,rt) }
+    progression_sample_results=ANALYZE_PROGRESSION_SAMPLE(progression_sample_inputs,go_reference.mapping,progression_biology_script)
+    progression_pair_left=progression_sample_results.map { m,a,g,e,c,su -> tuple(m.tk,m,a,g,e) }
+    progression_pair_right=progression_sample_results.map { m,a,g,e,c,su -> tuple(m.tk,m,a,g,e) }
+    progression_pair_inputs=progression_pair_left.combine(progression_pair_right,by:0).filter { subject,ma,aa,ga,ea,mb,ab,gb,eb -> ma.sample < mb.sample }.map { subject,ma,aa,ga,ea,mb,ab,gb,eb -> def pm=[subject:subject,sample_a:ma.sample,sample_b:mb.sample,pair_id:"${subject}.${ma.sample}_vs_${mb.sample}"]; tuple(pm,aa,ga,ea,ab,gb,eb) }
+    progression_pair_results=COMPARE_PROGRESSION_PAIR(progression_pair_inputs,progression_pair_script)
+    progression_biology=MERGE_PROGRESSION_BIOLOGY(
+        progression_sample_results.map { m,a,g,e,c,su -> a }.collect(), progression_sample_results.map { m,a,g,e,c,su -> g }.collect(), progression_sample_results.map { m,a,g,e,c,su -> e }.collect(), progression_sample_results.map { m,a,g,e,c,su -> c }.collect(), progression_sample_results.map { m,a,g,e,c,su -> su }.collect(),
+        progression_pair_results.map { m,a,g,e,su -> a }.collect(), progression_pair_results.map { m,a,g,e,su -> g }.collect(), progression_pair_results.map { m,a,g,e,su -> e }.collect(), progression_pair_results.map { m,a,g,e,su -> su }.collect(),
+        go_reference.metadata, progression_merge_script
+    )
     qc_files = raw_qc.qc
         .mix(trimmed_qc.qc, trim_result.reports, star_result.logs,
              flagstat, md_result.metrics, variant_stats)
@@ -1802,7 +1915,18 @@ workflow {
         variant_read_provenance.summary,
         comparative_report_script
     )
-    comparative_multiqc=PREPARE_COMPARATIVE_MULTIQC_CONTENT(comparative_report.report,comparative_report.variant_inventory,comparative_report.fasta_inventory,comparative_report.rna_inventory,comparative_report.external_comparison,comparative_report.multiqc_summary)
+    comparative_multiqc=PREPARE_COMPARATIVE_MULTIQC_CONTENT(
+        comparative_report.report,
+        comparative_report.variant_inventory,
+        comparative_report.fasta_inventory,
+        comparative_report.rna_inventory,
+        comparative_report.external_comparison,
+        comparative_report.multiqc_summary,
+        progression_biology.report,
+        progression_biology.multiqc_summary,
+        progression_biology.enrichment,
+        progression_biology.pairwise_categories
+    )
 
     complete_reporter=file("${projectDir}/build_complete_report.py", checkIfExists:true)
     report_samplesheet=file(params.samplesheet, checkIfExists:true)
@@ -1888,7 +2012,9 @@ workflow {
             read_validation.summary,
             validation_semantics_doc,
             comparative_report.report,
-            comparative_report.multiqc_summary
+            comparative_report.multiqc_summary,
+            progression_biology.report,
+            progression_biology.multiqc_summary
         )
         MULTIQC_FINAL(qc_files, final_multiqc_content.content)
     } else {

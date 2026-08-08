@@ -2,8 +2,8 @@
 <MaxQuantParams xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
    <fastaFiles>
       <FastaFileInfo>
-         <fastaFilePath>/cluster/home/ash022/scripts/pgtk/results2/combined_fasta/TK12.exploratory_proteogenomics.fasta</fastaFilePath>
-         <identifierParseRule>>(.*)</identifierParseRule>
+         <fastaFilePath>/cluster/projects/nn9036k/scrbkup/pgtk/results/combined_fasta/TK12.exploratory_proteogenomics.fasta</fastaFilePath>
+         <identifierParseRule>>([^ ]*)</identifierParseRule>
          <descriptionParseRule>>(.*)</descriptionParseRule>
          <taxonomyParseRule>OX=(\d+)</taxonomyParseRule>
          <variationParseRule></variationParseRule>
@@ -15,8 +15,8 @@
          <gff3FilePath></gff3FilePath>
       </FastaFileInfo>
       <FastaFileInfo>
-         <fastaFilePath>/cluster/home/ash022/scripts/pgtk/results2/combined_fasta/TK13.exploratory_proteogenomics.fasta</fastaFilePath>
-         <identifierParseRule>>(.*)</identifierParseRule>
+         <fastaFilePath>/cluster/projects/nn9036k/scrbkup/pgtk/results/combined_fasta/TK13.exploratory_proteogenomics.fasta</fastaFilePath>
+         <identifierParseRule>>([^ ]*)</identifierParseRule>
          <descriptionParseRule>>(.*)</descriptionParseRule>
          <taxonomyParseRule>OX=(\d+)</taxonomyParseRule>
          <variationParseRule></variationParseRule>
@@ -28,8 +28,8 @@
          <gff3FilePath></gff3FilePath>
       </FastaFileInfo>
       <FastaFileInfo>
-         <fastaFilePath>/cluster/home/ash022/scripts/pgtk/results2/combined_fasta/TK14.exploratory_proteogenomics.fasta</fastaFilePath>
-         <identifierParseRule>>(.*)</identifierParseRule>
+         <fastaFilePath>/cluster/projects/nn9036k/scrbkup/pgtk/results/combined_fasta/TK14.exploratory_proteogenomics.fasta</fastaFilePath>
+         <identifierParseRule>>([^ ]*)</identifierParseRule>
          <descriptionParseRule>>(.*)</descriptionParseRule>
          <taxonomyParseRule>OX=(\d+)</taxonomyParseRule>
          <variationParseRule></variationParseRule>
@@ -78,8 +78,8 @@
    <minScoreUnmodifiedPeptides>0</minScoreUnmodifiedPeptides>
    <minScoreModifiedPeptides>40</minScoreModifiedPeptides>
    <secondPeptide>True</secondPeptide>
-   <matchBetweenRuns>False</matchBetweenRuns>
-   <matchUnidentifiedFeatures>False</matchUnidentifiedFeatures>
+   <matchBetweenRuns>True</matchBetweenRuns>
+   <matchUnidentifiedFeatures>True</matchUnidentifiedFeatures>
    <matchBetweenRunsFdr>False</matchBetweenRunsFdr>
    <dependentPeptides>True</dependentPeptides>
    <dependentPeptideFdr>0.01</dependentPeptideFdr>
@@ -138,10 +138,10 @@
       <string>Acetyl (Protein N-term)</string>
       <string>Deamidation (NQ)</string>
    </restrictMods>
-   <matchingTimeWindow>0</matchingTimeWindow>
-   <matchingIonMobilityWindow>0</matchingIonMobilityWindow>
-   <alignmentTimeWindow>0</alignmentTimeWindow>
-   <alignmentIonMobilityWindow>0</alignmentIonMobilityWindow>
+   <matchingTimeWindow>1</matchingTimeWindow>
+   <matchingIonMobilityWindow>0.05</matchingIonMobilityWindow>
+   <alignmentTimeWindow>20</alignmentTimeWindow>
+   <alignmentIonMobilityWindow>1</alignmentIonMobilityWindow>
    <numberOfCandidatesMsms>15</numberOfCandidatesMsms>
    <compositionPrediction>0</compositionPrediction>
    <quantMode>2</quantMode>
@@ -169,7 +169,7 @@
    <name>session1</name>
    <maxQuantVersion>2.8.1.0</maxQuantVersion>
    <pluginFolder></pluginFolder>
-   <numThreads>32</numThreads>
+   <numThreads>40</numThreads>
    <emailAddress></emailAddress>
    <smtpHost></smtpHost>
    <emailFromAddress></emailFromAddress>
@@ -317,7 +317,7 @@
          </labelMods>
          <lcmsRunType>Standard</lcmsRunType>
          <reQuantify>False</reQuantify>
-         <lfqMode>0</lfqMode>
+         <lfqMode>1</lfqMode>
          <lfqNormClusterSize>80</lfqNormClusterSize>
          <lfqMinEdgesPerNode>3</lfqMinEdgesPerNode>
          <lfqAvEdgesPerNode>6</lfqAvEdgesPerNode>
@@ -329,7 +329,7 @@
          <fastLfq>True</fastLfq>
          <lfqRestrictFeatures>False</lfqRestrictFeatures>
          <lfqMinRatioCount>1</lfqMinRatioCount>
-         <lfqMinRatioCountDia>2</lfqMinRatioCountDia>
+         <lfqMinRatioCountDia>1</lfqMinRatioCountDia>
          <lfqPrioritizeMs1Dia>True</lfqPrioritizeMs1Dia>
          <lfqLamdaLimit>20</lfqLamdaLimit>
          <lfqMaxIter>10</lfqMaxIter>

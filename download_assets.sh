@@ -6,10 +6,10 @@ CONTAINER_DIR="$WORKDIR/singularity_cache"
 REFERENCE_DIR="$WORKDIR/reference_downloads"
 TMP_DIR="$WORKDIR/download_tmp"
 
-#export http_proxy="http://proxy.saga:3128/"
-#export https_proxy="http://proxy.saga:3128/"
-#export HTTP_PROXY="$http_proxy"
-#export HTTPS_PROXY="$https_proxy"
+# export http_proxy="http://proxy.saga:3128/"
+# export https_proxy="http://proxy.saga:3128/"
+# export HTTP_PROXY="$http_proxy"
+# export HTTPS_PROXY="$https_proxy"
 
 export SINGULARITY_CACHEDIR="$CONTAINER_DIR/oci_cache"
 export APPTAINER_CACHEDIR="$SINGULARITY_CACHEDIR"
@@ -31,6 +31,8 @@ command -v curl >/dev/null
 command -v gzip >/dev/null
 command -v tar >/dev/null
 command -v python >/dev/null
+command -v grep >/dev/null
+command -v sha256sum >/dev/null
 
 pull_image() {
     local name="$1"
@@ -158,6 +160,38 @@ validate_gzip() {
 
 validate_tar_gzip() {
     tar -tzf "$1" >/dev/null 2>&1
+}
+
+validate_obo() {
+    local file="$1"
+
+    [[ -s "$file" ]] &&
+    grep -q '^format-version:' "$file" &&
+    grep -q '^data-version:' "$file" &&
+    grep -q '^\[Term\]$' "$file" &&
+    grep -q '^id: GO:' "$file"
+}
+
+validate_gaf_gzip() {
+    local file="$1"
+
+    validate_gzip "$file" && python - "$file" <<'PYGAF'
+import gzip
+import sys
+
+has_version = False
+has_annotation = False
+with gzip.open(sys.argv[1], "rt", encoding="utf-8", errors="replace") as handle:
+    for line in handle:
+        if line.startswith("!gaf-version:"):
+            has_version = True
+        elif line.startswith("UniProtKB\t"):
+            has_annotation = True
+        if has_version and has_annotation:
+            break
+
+raise SystemExit(0 if has_version and has_annotation else 1)
+PYGAF
 }
 
 download_asset() {
@@ -327,6 +361,7 @@ download_asset \
     'Ensembl release 111 protein sequences' \
     validate_gzip \
     true
+
 download_asset \
     'https://ftp.ensembl.org/pub/release-111/variation/indexed_vep_cache/homo_sapiens_vep_111_GRCh38.tar.gz' \
     "$REFERENCE_DIR/homo_sapiens_vep_111_GRCh38.tar.gz" \
@@ -349,4 +384,34 @@ download_asset \
     validate_tar_gzip \
     true
 
-echo "All 15 containers and all 7 reference archives are valid."
+# GO assets are deliberately external and versioned. The pipeline records
+# ontology/GAF metadata and SHA-256 checksums in the final GO report.
+download_asset \
+    'https://purl.obolibrary.org/obo/go/go-basic.obo' \
+    "$REFERENCE_DIR/go-basic.obo" \
+    'Gene Ontology basic ontology' \
+    validate_obo \
+    false
+
+download_asset \
+    'https://current.geneontology.org/annotations/goa_human.gaf.gz' \
+    "$REFERENCE_DIR/goa_human.gaf.gz" \
+    'Gene Ontology human annotations' \
+    validate_gaf_gzip \
+    false
+
+cat > "$REFERENCE_DIR/downloaded_assets.sha256" <<EOF
+$(sha256sum \
+    "$REFERENCE_DIR/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz" \
+    "$REFERENCE_DIR/Homo_sapiens.GRCh38.111.gtf.gz" \
+    "$REFERENCE_DIR/Homo_sapiens.GRCh38.cdna.all.fa.gz" \
+    "$REFERENCE_DIR/Homo_sapiens.GRCh38.pep.all.fa.gz" \
+    "$REFERENCE_DIR/homo_sapiens_vep_111_GRCh38.tar.gz" \
+    "$REFERENCE_DIR/human_reviewed_isoforms.fasta.gz" \
+    "$REFERENCE_DIR/arriba_v2.4.0.tar.gz" \
+    "$REFERENCE_DIR/go-basic.obo" \
+    "$REFERENCE_DIR/goa_human.gaf.gz")
+EOF
+
+printf 'All 15 containers and all 9 reference assets are valid.\n'
+printf 'Reference checksums: %s\n' "$REFERENCE_DIR/downloaded_assets.sha256"
