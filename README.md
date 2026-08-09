@@ -1,114 +1,209 @@
 # PGTK: RNA-seq Proteogenomics and Comparative Variant Evidence
 
-PGTK is a Nextflow DSL2 workflow for exploratory RNA-seq proteogenomics. It processes paired-end RNA-seq data from local SRA archives, performs RNA-aware small-variant calling, detects fusions and novel splice-derived transcripts, generates sample-specific custom protein FASTAs, and optionally integrates external caller results and MaxQuant evidence.
+PGTK is a Nextflow DSL2 workflow for exploratory RNA-seq proteogenomics. It processes paired-end RNA-seq data from local SRA archives, performs RNA-aware small-variant calling, detects fusions and novel splice-derived transcripts, generates sample-specific custom protein FASTAs, quantifies gene expression, performs GO analysis, supports longitudinal baseline subtraction, and optionally integrates external caller and MaxQuant evidence.
 
-The workflow is designed for research use. RNA-derived variant calls may include germline, clonal, progression-associated, RNA-editing, alignment, and technical events. They must not be interpreted as clinically validated somatic variants without independent evidence.
-
+PGTK is intended for research use. RNA-observed variants can include germline, clonal, progression-associated, RNA-editing, alignment, expression-dependent, and technical events. They must not be described as clinically validated somatic mutations without independent DNA evidence.
 
 ## Quick start
 
-```
-#Check the (scratch.slurm)[scratch.slurm] and set location appropritately then
+```bash
+git clone https://github.com/animesh/pgtk.git
+cd pgtk
+
+cat samples.csv
+bash download_sra.sh
+bash download_assets.sh
+
+bash validate_pipeline_commands.sh \
+  --project-dir . \
+  --nextflow "$HOME/bin/nextflow"
+
 sbatch scratch.slurm
-#count variants in results folder
-for i in results/*/*.fasta ; do echo $i;  awk -F '|' '{print $2}' $i | awk -F '.' '{print $1}' | sort | uniq -c ; done
-#compare with sarek
+```
+
+The Slurm wrapper forwards arguments written after `--` to Nextflow and uses resume-compatible execution.
+
+## Staged execution
+
+### Stage 1: RNA pipeline, expression, GO, custom FASTAs, and reports
+
+```bash
+cd /cluster/projects/nn9036k/scrbkup/pgtk
+sbatch scratch.slurm
+```
+
+### Stage 2: external Sarek comparison
+
+```bash
+cd /cluster/projects/nn9036k/scrbkup/pgtk
 sbatch scratch.slurm -- \
   --run_external_vcf_comparison true \
-  --external_vcf_dir sarek \
+  --external_vcf_dir /cluster/projects/nn9036k/scrbkup/pgtk/sarek \
   --external_vcf_suffix .haplotypecaller.vcf.gz
-#map to maxquant
-sbatch scratch.slurm -- \
-  --run_map_maxquant true \
-  --external_maxquant_dir txt \
 ```
 
-## Current validated implementation
+### Stage 3: search the PGTK FASTAs with MaxQuant
 
-The current workflow has:
+MaxQuant is not executed by Nextflow. Run MaxQuant separately using each sample-specific PGTK custom FASTA together with the canonical human proteome and the MaxQuant contaminants FASTA.
 
-- 53 unique Nextflow processes
-- Monolithic GATK `SplitNCigarReads`
-- 24-way scattered HaplotypeCaller execution per sample
-- Explicit GVCF gathering and indexing
-- Published raw, filtered, PASS, VEP-annotated, and RNA-validated VCF stages
-- RNA fusion and splice-transcript validation
-- Codon-level and supporting-read provenance validation
-- Patient-aware baseline subtraction when metadata is available
-- Custom FASTAs containing only variant, fusion, and splice-derived proteins
-- Optional Sarek or external-caller comparison
-- Optional MaxQuant evidence integration
-- Comparative evidence, IGV, resource, failure, and MultiQC reports
-- Dynamic retry resources and normal/bigmem partition routing on Saga
+Custom FASTAs:
 
-The latest complete validation check  [passed](#validation).
+```text
+results/combined_fasta/TK12.exploratory_proteogenomics.fasta
+results/combined_fasta/TK13.exploratory_proteogenomics.fasta
+results/combined_fasta/TK14.exploratory_proteogenomics.fasta
+```
+
+Copy or link the resulting MaxQuant text directory to:
+
+```text
+txtMQMBR/
+```
+
+It must contain:
+
+```text
+peptides.txt
+evidence.txt
+msms.txt
+proteinGroups.txt
+mqpar.xml
+```
+
+### Stage 4: integrate existing MaxQuant results
+
+```bash
+cd /cluster/projects/nn9036k/scrbkup/pgtk
+sbatch scratch.slurm -- \
+  --run_proteogenomic_validation true \
+  --maxquant_txt /cluster/projects/nn9036k/scrbkup/pgtk/txtMQMBR \
+  --maxquant_contaminants "$HOME/scripts/MaxQuant_v2.8.1.0/bin/conf/contaminants.fasta"
+```
+
+If raw-file names do not unambiguously map to samples, add:
+
+```bash
+--maxquant_raw_map /cluster/projects/nn9036k/scrbkup/pgtk/maxquant_raw_file_map.tsv
+```
+
+If needed, explicitly override other MaxQuant provenance inputs:
+
+```bash
+--maxquant_mqpar /absolute/path/to/mqpar.xml \
+--maxquant_canonical_fasta /absolute/path/to/human_reviewed_isoforms.fasta
+```
+
+### Stage 5: run the scientific claim audit
+
+Use the job ID from the completed pipeline invocation:
+
+```bash
+cd /cluster/projects/nn9036k/scrbkup/pgtk
+python audit_pgtk_claims.py \
+  --project-dir /cluster/projects/nn9036k/scrbkup/pgtk \
+  --job-id JOB_ID \
+  --output-prefix results/pgtk_claim_audit_JOB_ID
+```
+
+The audit intentionally keeps transcript signatures, ranked GO, progression-variant GO, Sarek context, and proteomic evidence as separate evidence layers. MaxQuant output presence is recognized, but detailed peptide-supported H1 to H5 aggregation remains separate from the transcript-level hypothesis audit.
+
+## Current implementation
+
+The workflow includes:
+
+- Nextflow DSL2 execution with Saga Slurm routing
+- local SRA ingestion and paired FASTQ generation
+- raw and trimmed FastQC
+- Trim Galore preprocessing
+- STAR two-pass RNA alignment
+- coordinate-sorted and indexed STAR BAMs
+- Arriba fusion calling and RNA validation
+- StringTie transcript assembly and gffcompare novelty classification
+- splice-transcript RNA validation and TransDecoder protein prediction
+- monolithic GATK SplitNCigarReads
+- 24-way HaplotypeCaller scattering per sample
+- shard validation, GatherVcfs, indexing, and GenotypeGVCFs
+- publication of raw, filtered, PASS, VEP-annotated, and RNA-validated VCFs
+- codon-level and supporting-read provenance validation
+- per-sample non-subtracted custom protein FASTAs
+- patient-aware baseline subtraction as a separate VCF/reporting branch
+- shared, baseline-only, and non-baseline-only progression reports
+- optional external Sarek or other caller comparison at raw, PASS, and RNA-validated stages
+- optional MaxQuant evidence interpretation
+- event-specific IGV BED, BEDPE, BAM, batch, and session outputs
+- featureCounts gene quantification
+- merged raw-count, CPM, and TPM expression matrix
+- per-sample expression GO over-representation analysis
+- progression-versus-baseline ranked expression GO
+- common, complete-sample, and exclusive progression variant-set GO
+- pairwise progression GO contrasts
+- claim audit with strict separation of evidence layers
+- MultiQC, comparative, failure, resource, and provenance reports
 
 ## Publication and public data
 
-The biological context is described in:
+Biological context:
 
 **Multiple Myeloma Cells with Increased Proteasomal and ER Stress Are Hypersensitive to ATX-101, an Experimental Peptide Drug Targeting PCNA**
 
-- Journal: Cancers
-- Year: 2024
-- Volume: 16
-- Issue: 23
-- Article: 3963
-- DOI: https://doi.org/10.3390/cancers16233963
-- RNA-seq BioProject: `PRJNA1176350`
-- Proteomics: PRIDE `PXD033531` and `PXD033510`
+```text
+Journal: Cancers
+Year: 2024
+Volume: 16
+Issue: 23
+Article: 3963
+DOI: https://doi.org/10.3390/cancers16233963
+RNA-seq BioProject: PRJNA1176350
+Proteomics: PRIDE PXD033531 and PXD033510
+```
 
-Please cite the study when using the associated data or derived results.
+Cite the publication when using its data or derived results.
 
 ## Analysis model
 
-The main RNA-seq path is:
-
 ```text
-SRA archive
+Local SRA archive
   -> paired FASTQ
   -> raw FastQC
   -> Trim Galore
   -> trimmed FastQC
   -> STAR two-pass alignment
-       -> Arriba fusion calling
+       -> Arriba fusion branch
        -> coordinate-sorted BAM
-            -> StringTie assembly
-            -> gffcompare novelty classification
-            -> validated splice transcripts
-            -> TransDecoder protein prediction
+            -> featureCounts expression branch
+            -> StringTie/gffcompare splice branch
             -> MarkDuplicates
             -> SplitNCigarReads
             -> HaplotypeCaller, 24 shards
             -> shard validation
-            -> GatherVcfs and IndexFeatureFile
+            -> GatherVcfs and indexing
             -> GenotypeGVCFs
             -> raw VCF publication
             -> hard filtering
             -> PASS VCF publication
             -> VEP annotation
             -> RNA validation
-            -> codon and read-provenance validation
+            -> codon/read-provenance validation
             -> variant protein FASTA
 ```
 
-Custom per-sample FASTAs are constructed from:
+Custom FASTAs:
 
 ```text
 variant proteins
 + fusion proteins
 + splice-derived proteins
 -> exact amino-acid sequence deduplication
--> sample.exploratory_proteogenomics.fasta
+-> <sample>.exploratory_proteogenomics.fasta
 ```
 
-Canonical proteins are not embedded in these custom FASTAs. Add the canonical proteome separately in MaxQuant.
+Canonical proteins are not embedded in the custom FASTAs. Add the canonical proteome separately during the MaxQuant search.
 
 ## Samplesheet
 
 Only `sample` and `srr` are required.
 
-Minimal format:
+Minimal form:
 
 ```csv
 sample,srr
@@ -117,7 +212,7 @@ TK13,SRR31089073
 TK14,SRR31089072
 ```
 
-Full longitudinal format:
+Longitudinal form:
 
 ```csv
 sample,srr,TK,Group,baseline
@@ -126,15 +221,15 @@ TK13,SRR31089073,patient1,sensitive,false
 TK14,SRR31089072,patient1,sensitive,false
 ```
 
-Metadata semantics:
+Semantics:
 
-- `sample`: unique sample identifier used in filenames and outputs
-- `srr`: SRA run accession
-- `TK`: patient or subject identifier used for within-subject baseline matching
-- `Group`: biological metadata used in reports
-- `baseline`: `true` for the comparison reference and `false` otherwise
+- `sample`: unique sample identifier
+- `srr`: local SRA run accession
+- `TK`: patient or subject identifier
+- `Group`: biological metadata
+- `baseline`: comparison reference within each `TK`
 
-Defaults when optional columns are absent or empty:
+Defaults:
 
 ```text
 TK       = sample
@@ -142,13 +237,9 @@ Group    = sample
 baseline = false
 ```
 
-With a minimal samplesheet, all main analyses and per-sample FASTA generation run normally. Baseline subtraction is skipped because no baseline is defined.
-
-When longitudinal metadata is supplied, each non-baseline sample is compared with the `baseline=true` sample having the same `TK` value. The pipeline reports missing or ambiguous baselines rather than silently performing an invalid comparison.
+Per-sample FASTAs are always generated independently of baseline subtraction. A non-baseline sample is compared only when its subject has exactly one baseline. Missing or multiple baselines are reported rather than silently resolved.
 
 ## Variant stages
-
-The workflow preserves distinct calling and validation stages:
 
 ```text
 results/gvcf/<sample>.g.vcf.gz
@@ -159,33 +250,13 @@ results/vep/<sample>.vep.vcf.gz
 results/rna_validation/variants/<sample>.rna.validated.vcf.gz
 ```
 
-This separation allows direct comparison with other callers without mixing calling, filtering, annotation, and RNA-validation effects.
+Raw GenotypeGVCFs output and its index are published before hard filtering. This preserves clean comparisons with Sarek and other caller stages.
 
-## HaplotypeCaller strategy
+RNA-supported variants are not automatically DNA-confirmed mutations. Baseline absence in RNA does not prove biological or DNA-level absence.
 
-PGTK uses an RNA-aware path:
+## Longitudinal progression branch
 
-```text
-STAR BAM
--> MarkDuplicates
--> SplitNCigarReads
--> HaplotypeCaller in GVCF mode
--> GatherVcfs
--> IndexFeatureFile
--> GenotypeGVCFs
-```
-
-`SplitNCigarReads` is intentionally monolithic. Earlier interval-scattering experiments were removed because the tool is a context-sensitive, two-pass BAM transformation and scattered reconstruction introduced unnecessary correctness and maintenance risks.
-
-HaplotypeCaller remains interval-scattered because that stage is naturally parallelizable. Every shard is checked before gathering.
-
-Important caller settings are configurable, including calling confidence, soft-clipped-base handling, PCR indel model, thread count, and optional dbSNP resources.
-
-## Baseline and progression analysis
-
-Per-sample custom FASTAs are always non-subtracted. Baseline subtraction is a separate VCF and reporting branch.
-
-For every valid non-baseline versus baseline pair, PGTK writes:
+For each valid progression-versus-baseline pair:
 
 ```text
 results/progression_vcf/<sample>.nonbaseline_only.vep.vcf.gz
@@ -194,354 +265,293 @@ results/progression_vcf/<sample>.shared_with_baseline.vep.vcf.gz
 results/progression_vcf/<sample>.subtraction.summary.tsv
 ```
 
-These outputs distinguish:
+The branch reports non-baseline-only, baseline-only, and shared variants separately.
 
-- variants present only in the non-baseline sample
-- variants present only in the baseline sample
-- variants shared by both samples
-
-This branch adds longitudinal biological interpretation that is not provided by independent per-sample HaplotypeCaller VCFs.
-
-## RNA-event branches
-
-### Variants
-
-PGTK validates VEP-annotated calls using RNA evidence, including depth, alternate-read count, and alternate-allele fraction.
-
-### Fusions
-
-Arriba calls chimeric events from the STAR chimeric BAM. Accepted events are validated and translated into fusion-derived protein sequences with pVACfuse.
-
-### Splicing
-
-StringTie assembles expressed transcripts. gffcompare identifies selected transcript classes, RNA evidence is validated, and TransDecoder predicts splice-derived proteins.
-
-These fusion and transcript-structure outputs are not representable as ordinary small-variant VCF records and therefore can complement DNA-oriented callers.
-
-## Validation semantics
-
-Variant-codon results use three top-level outcomes:
+Progression biology outputs:
 
 ```text
-VARIANT_CODON_VALIDATED
-VARIANT_EVIDENCE_PARTIAL
-VALIDATION_FAILED
+results/progression_biology/progression_biology.progression_alleles.tsv
+results/progression_biology/progression_biology.progression_genes.tsv
+results/progression_biology/progression_biology.go_enrichment.tsv
+results/progression_biology/progression_biology.pairwise_go_contrasts.tsv
+results/progression_biology/sets/progression_variant_sets.variant_set_go.tsv
+results/progression_biology/sets/progression_variant_sets.summary.tsv
 ```
 
-`VARIANT_CODON_VALIDATED` requires reference agreement, sample-matched RNA alternate support, and a directly comparable coding consequence.
+These tables retain complete tested GO terms. MultiQC displays summaries only.
 
-`VARIANT_EVIDENCE_PARTIAL` retains valid genome and RNA evidence when a consequence cannot safely be represented as a single codon comparison.
+## Gene expression and GO
 
-`VALIDATION_FAILED` requires one or more explicit failure codes.
-
-Synonymous consequences are accepted as `SYNONYMOUS_CODON_TRANSLATION_CONFIRMED` when reference and alternate codons translate to the same amino acid. An empty VEP alternate-amino-acid field is accepted for synonymous VEP representations.
-
-Primary failure categories are mutually exclusive. Overlapping failure occurrences are reported separately and are explicitly non-additive.
-
-Strict integrated proteogenomic evidence requires:
-
-- codon strict-integration eligibility
-- sample-matched direct MS/MS evidence
-- a search-consistent altered-residue peptide
-- absence from the configured canonical reference protein sets
-
-## Custom FASTA outputs
-
-Main per-sample custom FASTAs:
+featureCounts parameters:
 
 ```text
-results/combined_fasta/<sample>.exploratory_proteogenomics.fasta
+--gene_count_feature_type exon
+--gene_count_id_attribute gene_id
+--gene_count_symbol_attribute gene_name
+--gene_count_biotypes all
+--gene_count_strandedness 0
+--gene_count_min_mapq 10
+--gene_count_min_overlap 1
+--gene_count_count_read_pairs true
+--gene_count_require_both_ends false
+--gene_count_exclude_chimeric true
+--gene_count_primary_only true
+--gene_count_allow_multi_overlap false
+--gene_count_count_multimapping false
 ```
 
-These contain only deduplicated non-canonical event-derived sequences:
+Expression outputs:
 
 ```text
-variant proteins
-fusion proteins
-splice-derived proteins
+results/expression/per_sample/<sample>.gene_counts.tsv
+results/expression/per_sample/<sample>.gene_counts.tsv.summary
+results/expression/gene_expression.gene_expression.tsv
+results/expression/gene_expression.summary.tsv
+results/expression/go/expression_go.expression_ora.tsv
+results/expression/go/expression_go.ranked_go.tsv
+results/expression/go/expression_go.summary.tsv
 ```
 
-Additional component FASTAs are retained under:
+CPM uses the assigned-library total. TPM uses non-overlapping exon-union lengths and is normalized within each sample.
+
+Expression ORA asks which GO terms are overrepresented among expressed genes. Ranked expression GO asks whether genes in a GO term shift upward or downward in progression versus baseline using:
 
 ```text
-results/variant_fasta/
-results/fusion_fasta/
-results/splice_fasta/
+log2((progression TPM + 0.5) / (baseline TPM + 0.5))
 ```
 
-For MaxQuant, search each custom FASTA together with:
+Progression-variant GO is separate. It asks whether genes carrying non-baseline-only RNA-observed variants are overrepresented in GO categories. It does not test expression upregulation.
 
-- the canonical proteome FASTA
-- the contaminants FASTA
-- any other explicitly intended reference database
+Important distinction:
+
+```text
+Expression-ranked GO
+  tests coordinated transcript direction
+
+Progression-variant GO
+  tests concentration of variant-bearing genes
+```
+
+GO terms overlap extensively and must not be counted as independent pathways.
+
+## Claim audit
+
+Run:
+
+```bash
+python audit_pgtk_claims.py \
+  --project-dir . \
+  --job-id JOB_ID \
+  --output-prefix results/pgtk_claim_audit_JOB_ID
+```
+
+Principal outputs:
+
+```text
+pgtk_claim_audit_JOB_ID.report.md
+pgtk_claim_audit_JOB_ID.claims.tsv
+pgtk_claim_audit_JOB_ID.supported_claims.tsv
+pgtk_claim_audit_JOB_ID.unsupported_claims.tsv
+pgtk_claim_audit_JOB_ID.insights.tsv
+pgtk_claim_audit_JOB_ID.article_signatures.tsv
+pgtk_claim_audit_JOB_ID.novel_findings.tsv
+pgtk_claim_audit_JOB_ID.hypothesis_scores.tsv
+pgtk_claim_audit_JOB_ID.hypothesis_evidence_matrix.tsv
+pgtk_claim_audit_JOB_ID.hypothesis_variant_hits.tsv
+pgtk_claim_audit_JOB_ID.hypothesis_novel_findings.tsv
+pgtk_claim_audit_JOB_ID.checks.tsv
+pgtk_claim_audit_JOB_ID.json
+```
+
+The audit evaluates five predefined hypotheses:
+
+```text
+H1 proteostasis and translation
+H2 metabolic rewiring
+H3 surface, glycan, extracellular-matrix and adhesion remodeling
+H4 MYC, IRF4, DNA repair and progression
+H5 PCNA stress and ATX-101-associated biomarkers
+```
+
+Evidence labels distinguish:
+
+```text
+SUPPORTED_WITHIN_EXPRESSION_LAYER
+PARTIALLY_SUPPORTED_WITHIN_EXPRESSION_LAYER
+NOT_SUPPORTED_OR_MIXED
+NOT_TESTED
+```
+
+Targeted signatures and ranked GO use the same expression matrix. Their agreement is internal expression concordance, not independent validation. Sarek gives general callset-reproducibility context unless hypothesis-gene support is explicitly demonstrated. Proteomics and functional assays remain separate evidence layers.
+
+The audit uses canonical protein-coding cytosolic and mitochondrial ribosome lists, excludes pseudogenes from those signatures, requires TPM of at least 1 in one compared sample, and labels olfactory-receptor GO findings for artifact review.
+
+MHC class II reduction is reported only if at least two significant negative MHC class II GO terms are present. The audit records exact GO IDs, MeanScores, and FDR values.
+
+The H3 terminology is deliberately `surface_glycan_adhesion_remodeling`; the audit does not infer glycan loss, marrow escape, or increased invasion from mixed transcript changes.
 
 ## Optional external-caller comparison
-
-External comparison is disabled by default.
-
-Enable it explicitly:
 
 ```bash
 sbatch scratch.slurm -- \
   --run_external_vcf_comparison true \
-  --external_vcf_dir /cluster/projects/nn9036k/scrbkup/pgtk/sarek \
+  --external_vcf_dir ./sarek \
   --external_vcf_suffix .haplotypecaller.vcf.gz
 ```
 
-The external directory is searched recursively. Files are matched to samples using the samplesheet `srr` field, for example:
-
-```text
-SRR31089074.haplotypecaller.vcf.gz
-```
-
-Comparison outputs are written under:
+Files are matched recursively using the samplesheet `srr` field. Results are written under:
 
 ```text
 results/comparison/external_vcf/
 ```
 
-Reports include:
-
-- shared alleles
-- PGTK-only alleles
-- external-only alleles
-- reciprocal overlap percentages
-- Jaccard similarity
-- SNP and indel counts
-- genotype concordance
-- discordant-call coordinates for review
-
-The comparison runs separately for PGTK raw, PASS, and RNA-validated stages.
+Comparisons are performed separately for raw, PASS, and RNA-validated PGTK stages.
 
 ## Optional MaxQuant validation
 
-MaxQuant validation is disabled by default.
-
-Enable it only after MaxQuant has searched the newly generated custom FASTAs:
-
-```bash
-sbatch scratch.slurm -- \
-  --run_proteogenomic_validation true \
-  --maxquant_txt /cluster/projects/nn9036k/scrbkup/pgtk/txtMQMBR
-```
-
-The MaxQuant text directory must contain:
+MaxQuant validation is disabled by default:
 
 ```text
-peptides.txt
-evidence.txt
-msms.txt
-proteinGroups.txt
+--run_proteogenomic_validation false
 ```
 
-`mqpar.xml` is resolved from that directory or its parent. The optional branch validates the actual searched FASTA provenance before interpreting peptide evidence.
+PGTK does not run MaxQuant. It interprets an existing MaxQuant search performed with the exact PGTK custom FASTAs, canonical proteome, and contaminants database.
 
-The MaxQuant branch performs:
-
-- input and search-provenance validation
-- peptide mapping to every searched FASTA
-- altered-residue variant-peptide annotation
-- fusion and splice peptide analysis
-- translated exon-junction validation
-- sample-matched direct MS/MS classification
-- Match Between Runs classification
-- strict integrated variant evidence
-- read-level validation and IGV output generation
-
-## Recommended staged execution
-
-### Stage 1: Generate RNA results and custom FASTAs
-
-Both optional branches are disabled by default:
+Enable integration:
 
 ```bash
-cd /cluster/projects/nn9036k/scrbkup/pgtk
-sbatch scratch.slurm
-```
-
-### Stage 2: Add external-caller comparison
-
-After Stage 1 finishes:
-
-```bash
-cd /cluster/projects/nn9036k/scrbkup/pgtk
-sbatch scratch.slurm -- \
-  --run_external_vcf_comparison true \
-  --external_vcf_dir /cluster/projects/nn9036k/scrbkup/pgtk/sarek \
-  --external_vcf_suffix .haplotypecaller.vcf.gz
-```
-
-MaxQuant remains disabled. Unchanged tasks are reused through `-resume`.
-
-### Stage 3: Search custom FASTAs with MaxQuant
-
-Use the custom FASTAs in `results/combined_fasta/` together with the canonical and contaminant FASTAs.
-
-### Stage 4: Add MaxQuant evidence
-
-After MaxQuant writes `txtMQMBR`:
-
-```bash
-cd /cluster/projects/nn9036k/scrbkup/pgtk
 sbatch scratch.slurm -- \
   --run_proteogenomic_validation true \
   --maxquant_txt /cluster/projects/nn9036k/scrbkup/pgtk/txtMQMBR \
-  --run_external_vcf_comparison true \
-  --external_vcf_dir /cluster/projects/nn9036k/scrbkup/pgtk/sarek \
-  --external_vcf_suffix .haplotypecaller.vcf.gz
+  --maxquant_contaminants "$HOME/scripts/MaxQuant_v2.8.1.0/bin/conf/contaminants.fasta"
 ```
 
-Keep the work directory, `.nextflow` metadata, and result directory between stages so that compatible tasks can be resumed.
+The contaminants FASTA is passed through `params.maxquant_contaminants`, resolved by `resolveContaminants`, and staged automatically by Nextflow into processes that require it. It is not copied into the MaxQuant text directory. The supplied file should be the same contaminants database used in the MaxQuant search.
 
-## Comparative evidence reports
-
-The comparative report is written under:
+If `--maxquant_contaminants` is omitted, the workflow requires exactly one `contaminants.fasta` or `contaminants.fa` under one of these locations:
 
 ```text
-results/comparative_advantage/
+--maxquant_txt directory
+parent of --maxquant_txt
+project directory
+$HOME/scripts/MaxQuant_v2.8.1.0/bin/conf/contaminants.fasta
 ```
 
-Principal files include:
+`mqpar.xml` must report `includeContaminants=True` and must contain searched FASTA paths. Canonical FASTAs are resolved from `mqpar.xml` unless overridden with `--maxquant_canonical_fasta`.
+
+The branch executes:
 
 ```text
-comparative_advantage.report.md
-comparative_advantage.variant_stage_inventory.tsv
-comparative_advantage.fasta_inventory.tsv
-comparative_advantage.rna_event_inventory.tsv
-comparative_advantage.external_caller_comparison.tsv
-comparative_advantage.multiqc_summary.tsv
+VALIDATE_MAXQUANT_INPUTS
+MAP_MAXQUANT_PEPTIDES
+ANNOTATE_MAXQUANT_VARIANTS
+ANALYZE_MAXQUANT_JUNCTIONS
+VALIDATE_MAXQUANT_SPLICE_JUNCTIONS
+BUILD_PROTEOGENOMICS_EVIDENCE_REPORT
+BUILD_INTEGRATED_VARIANT_EVIDENCE
+VALIDATE_PROTEOGENOMIC_READS
+PREPARE_FINAL_MULTIQC_CONTENT
+MULTIQC_FINAL
 ```
 
-These reports document advantages beyond simple variant discovery, including:
+It distinguishes:
 
-- RNA-supported call prioritization
-- longitudinal baseline subtraction
-- fusion discovery
-- novel splice-transcript discovery
-- custom protein-sequence generation
-- codon and read-provenance validation
-- MaxQuant peptide evidence
-- IGV-ready event evidence
+- direct MS/MS from Match Between Runs
+- sample-matched from cross-sample evidence
+- canonical peptide support from event-specific support
+- altered-residue variant peptides
+- fusion-junction peptides
+- splice-junction peptides
+- unique from ambiguous mappings
+- accepted, unresolved, and rejected associations
+
+Principal outputs:
+
+```text
+results/proteogenomics_validation/maxquant_inputs.validated.txt
+results/proteogenomics_validation/peptide_fasta_mapping.mapping.tsv
+results/proteogenomics_validation/variant_peptide_annotation.detailed.tsv
+results/proteogenomics_validation/validated_splice_junctions.detailed.tsv
+results/proteogenomics_validation/proteogenomics_evidence.variants.tsv
+results/proteogenomics_validation/proteogenomics_evidence.junctions.tsv
+results/proteogenomics_validation/proteogenomics_evidence.direct_msms_variants.tsv
+results/proteogenomics_validation/proteogenomics_evidence.direct_msms_junctions.tsv
+results/proteogenomics_validation/proteogenomics_evidence.mbr_only_variants.tsv
+results/proteogenomics_validation/proteogenomics_evidence.mbr_only_junctions.tsv
+results/proteogenomics_validation/proteogenomics_evidence.sample_matched_direct_msms_variants.tsv
+results/proteogenomics_validation/proteogenomics_evidence.sample_matched_direct_msms_junctions.tsv
+results/proteogenomics_validation/integrated_variant_evidence.strict.tsv
+results/proteogenomics_validation/proteogenomics_evidence.report.md
+results/proteogenomics_validation/proteogenomics_evidence.summary.txt
+```
+
+Strict event confirmation requires sample-matched direct MS/MS evidence, consistency with the searched FASTAs, altered-residue or junction coverage, and absence from configured canonical reference proteins. File presence alone is not biological confirmation.
 
 ## IGV outputs
 
-PGTK produces Nextflow-wired visualization bundles under:
+Global RNA/progression bundle:
 
 ```text
-results/igv/all_evidence/
+results/igv/all_evidence/pgtk_igv.events.tsv
+results/igv/all_evidence/pgtk_igv.events.bed
+results/igv/all_evidence/pgtk_igv.events.bedpe
+results/igv/all_evidence/pgtk_igv.sample_manifest.tsv
+results/igv/all_evidence/pgtk_igv.igv.batch.txt
+results/igv/all_evidence/pgtk_igv.igv.session.xml
+results/igv/all_evidence/pgtk_igv.<sample>.events.bam
+results/igv/all_evidence/pgtk_igv.<sample>.events.bam.bai
 ```
 
-The bundle may include:
+MaxQuant-enabled read-validation outputs are written under:
 
 ```text
-pgtk_igv.events.tsv
-pgtk_igv.events.bed
-pgtk_igv.sample_manifest.tsv
-pgtk_igv.igv.batch.txt
-pgtk_igv.igv.session.xml
-pgtk_igv.summary.txt
-pgtk_igv.<sample>.events.bam
-pgtk_igv.<sample>.events.bam.bai
+results/proteogenomics_validation/read_validation/
 ```
-
-It covers RNA-validated variants, progression-specific variants, fusion events, splice events, and proteogenomic evidence when available.
 
 ## MultiQC
-
-The final MultiQC report is written to:
 
 ```text
 results/multiqc/multiqc_report.html
 results/multiqc/multiqc_report_data/
 ```
 
-It includes standard QC plus custom sections for:
+MultiQC includes standard QC and custom sections for RNA findings, validation failures, codon evidence, read provenance, progression biology, comparative evidence, expression GO, proteogenomics evidence when enabled, and validation semantics.
 
-- complete RNA and proteogenomics findings
-- RNA validation failures and explanations
-- codon validation and mismatch investigation
-- strict integrated variant evidence
-- supporting-read provenance
-- proteogenomics evidence and classification
-- read-level validation
-- validation and failure semantics
-- comparative biological advantage
-- comparative summary
+Complete term-level GO tables remain in TSV outputs. MultiQC contains summaries and selected content.
 
-The final MultiQC report is produced even when MaxQuant and external comparison are disabled. Optional sections report their disabled or unavailable status explicitly.
+## Resource, retry, and failure model
 
-## Resource and retry model
-
-The production resource profile is based on observed Saga execution. Important initial allocations include:
+Resource-related failures with exit codes 137, 140, or 143 permit three attempts:
 
 ```text
-FASTQC:                         2 CPUs, 2 GB
-HaplotypeCaller shard:          2 CPUs, 4 GB
-Gather Haplotype GVCF:          2 CPUs, 4 GB
-Genotype and filtering:         2 CPUs, 4 GB
-StringTie:                      2 CPUs, 3 GB
-RNA splice validation:          2 CPUs, 1 GB
-Variant codon validation:       2 CPUs, 1 GB
-STAR alignment:                32 CPUs, 64 GB
-MarkDuplicates:                 2 CPUs, 48 GB
-SplitNCigarReads:               2 CPUs, 24 GB
+Attempt 1: 1x resources
+Attempt 2: 2x resources
+Attempt 3: 4x resources
 ```
 
-Resource-related failures with exit codes 137, 140, or 143 allow three total attempts. Deterministic command and configuration failures terminate immediately:
-
-```text
-Attempt 1: 1x initial resources
-Attempt 2: 2x initial resources
-Attempt 3: 4x initial resources
-```
-
-Absolute retry limits:
+Limits:
 
 ```text
 Maximum CPUs: 32
 Maximum memory: 512 GB
 ```
 
-Partition routing is recalculated per attempt:
+Partition routing:
 
 ```text
-normal: request is at most 20 CPUs and at most 160 GB
-bigmem: request exceeds 20 CPUs or 160 GB
+normal: <= 20 CPUs and <= 160 GB
+bigmem: > 20 CPUs or > 160 GB
 ```
 
-GATK Java maximum heap is derived from 80 percent of effective task memory. CPU retry scaling is used only for tools with explicit thread controls. Effectively serial tools retain their calibrated CPU count while memory can escalate.
-
-## Failure and provenance records
-
-The wrapper records failures under:
+Failure records:
 
 ```text
 results/failure_logs/<job-id>/
-```
-
-Records include:
-
-- failure ledger
-- run summary
-- pipeline trace
-- Nextflow log
-- controller log
-- failed task commands
-- task standard output and error
-- exit codes
-- effective resources and partition
-- timestamps
-
-Cumulative histories are maintained under:
-
-```text
 results/failure_logs/failure_history.tsv
 results/failure_logs/run_history.tsv
 ```
 
-A pipeline can complete successfully after a retry while retaining the earlier failed-attempt evidence.
-
-Post-run execution artifacts include:
+Execution reports:
 
 ```text
 results/pipeline_trace-<job-id>.tsv
@@ -553,24 +563,6 @@ results/resource_usage-<job-id>.warnings.tsv
 results/resource_usage-<job-id>.report.md
 ```
 
-## Important implementation details
-
-- SRA archives are local runtime inputs. Compute tasks do not require internet access.
-- References and container paths are supplied at runtime and validated before task submission.
-- Apptainer is used for process execution.
-- STAR produces the chimeric BAM needed by Arriba.
-- Sorted BAMs are used by StringTie, validation, and IGV branches.
-- `SplitNCigarReads` remains monolithic for correctness.
-- HaplotypeCaller is scattered and every shard is validated before gathering.
-- `GatherVcfs` is followed by `IndexFeatureFile`.
-- Raw GenotypeGVCFs output is published before filtering.
-- VEP keeps all overlapping transcript consequences.
-- Empty biological result sets generate valid empty outputs where appropriate.
-- Nonzero tool failures remain fatal unless successfully resolved by the retry policy.
-- Custom FASTAs exclude canonical sequences and deduplicate exact amino-acid sequences.
-- Baseline subtraction never modifies the per-sample custom FASTAs.
-- External-caller and MaxQuant branches require explicit `true` flags.
-
 ## Project layout
 
 ```text
@@ -579,128 +571,60 @@ pgtk/
 ├── nextflow.config
 ├── scratch.slurm
 ├── samples.csv
+├── audit_pgtk_claims.py
 ├── reference_downloads/
 ├── sra_cache/
 ├── singularity_cache/
-├── sarek/                 # optional external VCFs
-├── txtMQMBR/              # optional MaxQuant text output
+├── sarek/
+├── txtMQMBR/
 └── results/
 ```
 
-Large Nextflow work files are kept outside the repository, for example:
-
-```text
-/cluster/work/users/ash022/work
-```
-
-Do not delete the work directory when resume compatibility is required.
+Keep the Nextflow work directory and `.nextflow` metadata when resume compatibility is required.
 
 ## Validation
 
-Run:
-
 ```bash
-cd /cluster/projects/nn9036k/scrbkup/pgtk
-
 bash validate_pipeline_commands.sh \
-  --project-dir /cluster/projects/nn9036k/scrbkup/pgtk \
+  --project-dir . \
   --nextflow /cluster/home/ash022/bin/nextflow
 ```
 
-The current validated version reports:
+Validation covers process declarations, resource selectors, Python and shell syntax, Nextflow inspection, runtime paths, raw VCF publication, shard completeness, retry behavior, progression outputs, custom FASTA composition, GO wiring, optional branch defaults, MaxQuant provenance checks, IGV reports, and MultiQC sections.
 
-```text
-PASS: 180
-FAIL: 0
-RESULT: PASSED
-```
 
-Validation covers:
+## Interpretation rules
 
-- all 53 process declarations
-- one resource selector per process
-- Python and shell syntax
-- Nextflow inspection
-- reference and runtime preflight wiring
-- raw VCF publication
-- HaplotypeCaller shard completeness
-- retry and partition semantics
-- dynamic GATK heap wiring
-- progression subtraction outputs
-- custom FASTA composition
-- optional external-caller and MaxQuant defaults
-- comparative and IGV report wiring
-- MultiQC custom sections
-- known historical regression patterns
-
-## Historical regressions removed
-
-The production workflow no longer contains:
-
-- scattered `SplitNCigarReads`
-- custom split-BAM gathering
-- boundary duplicate normalization
-- split-BAM equivalence branches
-- unsupported `samtools cat -@`
-- Python execution assumptions inside samtools-only containers
-- artificial global `maxForks` limits
-- canonical proteins embedded in custom FASTAs
-- default-enabled Sarek or MaxQuant validation
-
-Historical failures are explicitly checked, including:
-
-- multi-output process objects used as channels
-- missing tools inside containers
-- incomplete GVCF indexing
-- incorrect BAM index names
-- HTML entity corruption
-- malformed or missing runtime inputs
-- missing MaxQuant sentinel files
-- incorrect synonymous-codon failure classification
-- failure logging skipped because of shell exit behavior
-- trace values represented as `-`
-- resource selectors missing for newly added processes
-
-## Interpreting comparisons with Sarek
-
-Sarek and PGTK differ biologically and computationally. Sarek provides an independent HaplotypeCaller workflow, while PGTK applies RNA-aware preprocessing, filtering, RNA evidence, transcript translation, longitudinal subtraction, fusion and splice discovery, and proteogenomic integration.
-
-Previous comparison of the same three samples showed:
-
-```text
-Approximately 80% to 83% of PGTK raw alleles were found by Sarek
-Approximately 82% to 85% of PGTK PASS alleles were found by Sarek
-Approximately 80% to 83% of PGTK RNA-validated alleles were found by Sarek
-Approximately 97% to 98% genotype agreement among shared alleles
-```
-
-Sarek therefore provides strong independent support for most PGTK small variants. PGTK adds biological interpretation beyond the caller overlap:
-
-- stringent RNA support
-- progression-specific subtraction
-- fusion and splice events
-- protein-sequence generation
-- codon consistency
-- read provenance
-- MaxQuant peptide evidence
-- IGV-ready event bundles
+- RNA-supported variants are not DNA-confirmed mutations.
+- Non-baseline-only RNA observations are not proven newly acquired variants.
+- RNA-supported fusions are not confirmed genomic rearrangements.
+- Read-supported splice transcripts do not prove complete isoform structure.
+- FASTA entries are search candidates, not peptide confirmation.
+- Ranked GO and targeted signatures from the same expression matrix are not independent validation.
+- GO terms are overlapping ontology categories, not independent pathways.
+- Sarek overlap is general caller reproducibility unless gene-specific support is shown.
+- MaxQuant output presence is not event confirmation.
+- Match Between Runs is not equivalent to direct MS/MS.
+- Sample-matched event-spanning peptides are stronger than canonical protein-group detection.
+- Transcript abundance does not establish protein abundance, pathway activity, metabolic flux, drug sensitivity, or causation.
+- A single longitudinal subject does not support population-level differential-expression inference.
+- Similarity to an sPCL signature does not establish clinical plasma cell leukemia.
 
 ## Limitations
 
-- RNA-derived variants are not equivalent to validated DNA somatic variants.
-- Transcript abundance strongly affects variant detectability.
-- Regions without RNA expression cannot be evaluated reliably.
-- Alternative alignment, reference, soft-clipping, and filtering choices can change callsets.
-- Baseline subtraction means absence from the observed baseline RNA callset, not proven biological absence.
-- External VCF comparison should use compatible references and normalized alleles.
-- MaxQuant evidence depends on the exact searched FASTA set and search configuration.
-- Custom FASTAs can increase the search space and require appropriate false-discovery-rate control.
-
+- RNA detectability depends on expression and coverage.
+- Unexpressed genomic regions cannot be evaluated reliably.
+- Alignment, reference, filtering, and soft-clipping choices affect RNA callsets.
+- External comparisons require compatible references and normalized alleles.
+- Baseline subtraction reports absence from the observed baseline RNA callset, not proven biological absence.
+- Custom FASTAs enlarge the search space and require appropriate FDR control.
+- MaxQuant interpretation depends on the exact searched FASTAs, contaminants database, raw-file mapping, and search configuration.
+- Proteomic and functional confirmation must remain distinct from RNA-level evidence.
 
 ## License
 
-See [LICENSE](LICENSE) for details.
+See [LICENSE](LICENSE).
 
 ## Contact
 
-For questions about the workflow or data, open an issue or contact `animesh@fuzzylife.org`.
+Open a GitHub issue or contact `animesh@fuzzylife.org`.

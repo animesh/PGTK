@@ -13,12 +13,15 @@ REFERENCE_FILES = (
     'human_reviewed_isoforms.fasta.gz',
     'homo_sapiens_vep_111_GRCh38.tar.gz',
     'arriba_v2.4.0.tar.gz',
+    'go-basic.obo',
+    'goa_human.gaf.gz',
 )
 LOCAL_CONTAINER_FILES = (
     'pvactools-7.1.1.img',
     'stringtie-3.0.3.img',
     'gffcompare-0.12.10.img',
     'transdecoder-6.0.0.img',
+    'subread-2.0.8.img',
 )
 REQUIRED_SAMPLE_COLUMNS = ('sample', 'srr')
 OPTIONAL_SAMPLE_COLUMNS = ('TK', 'Group', 'baseline')
@@ -94,18 +97,38 @@ def main():
         raise ValueError(f'host Python is not executable: {args.host_python}')
     if not os.access(args.apptainer, os.X_OK):
         raise ValueError(f'Apptainer is not executable: {args.apptainer}')
+    subread_image = args.container_cache / 'subread-2.0.8.img'
+    subprocess.run([str(args.apptainer), 'exec', str(subread_image), 'featureCounts', '-v'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     samtools_images = sorted(args.container_cache.rglob('*samtools-1.21*img'))
     if len(samtools_images) != 1:
         raise ValueError(f'expected exactly one samtools 1.21 image below {args.container_cache}; found {len(samtools_images)}')
+    multiqc_images = sorted(args.container_cache.rglob('*multiqc-1.35*img'))
+    if len(multiqc_images) != 1:
+        raise ValueError(f'expected exactly one MultiQC 1.35 image below {args.container_cache}; found {len(multiqc_images)}')
     host_python_real = args.host_python.resolve()
     host_python_root = host_python_real.parent.parent
-    bind_paths = f'{args.project_dir},{args.reference_downloads},{args.container_cache},{host_python_root}'
-    base = [str(args.apptainer), 'exec', '--no-home', '--pid', '-B', bind_paths, str(samtools_images[0])]
-    subprocess.run(base + [str(host_python_real), '-c', 'import csv,gzip,subprocess,xml.etree.ElementTree; print("HOST_PYTHON_OK")'], check=True)
-    subprocess.run(base + ['samtools', '--version'], check=True, stdout=subprocess.DEVNULL)
-    subprocess.run(base + [str(host_python_real), str(args.project_dir / 'build_igv_evidence_bundle.py'), '--help'], check=True, stdout=subprocess.DEVNULL)
+    bind_paths = ','.join(dict.fromkeys(map(str, (
+        args.project_dir,
+        args.reference_downloads,
+        args.container_cache,
+        args.sra_dir,
+        args.work_dir,
+        args.tmp_root,
+        args.results_dir,
+        host_python_root,
+    ))))
+    common = [str(args.apptainer), 'exec', '--no-home', '--pid', '-B', bind_paths]
+    samtools_base = common + [str(samtools_images[0])]
+    multiqc_base = common + [str(multiqc_images[0])]
+    standard_library_probe = 'import csv,gzip,math,subprocess,xml.etree.ElementTree; print("HOST_PYTHON_STDLIB_OK")'
+    subprocess.run(samtools_base + [str(host_python_real), '-c', standard_library_probe], check=True)
+    subprocess.run(samtools_base + ['samtools', '--version'], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(samtools_base + [str(host_python_real), str(args.project_dir / 'build_igv_evidence_bundle.py'), '--help'], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(multiqc_base + [str(host_python_real), '-c', standard_library_probe], check=True)
+    subprocess.run(multiqc_base + [str(host_python_real), str(args.project_dir / 'expression_go_analysis.py'), '--help'], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(multiqc_base + [str(host_python_real), str(args.project_dir / 'analyze_progression_biology.py'), '--help'], check=True, stdout=subprocess.DEVNULL)
     validate_samples(args.samplesheet, args.sra_dir)
-    print('PASS: runtime references, containers, SRA inputs, samplesheet, host Python and samtools/Python process contract')
+    print('PASS: runtime references, containers, SRA inputs, samplesheet, dependency-free host Python, featureCounts, samtools/Python and MultiQC/GO Python contracts')
 
 if __name__ == '__main__':
     try:

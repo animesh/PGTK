@@ -6,6 +6,7 @@ CONTAINER_DIR="$WORKDIR/singularity_cache"
 REFERENCE_DIR="$WORKDIR/reference_downloads"
 TMP_DIR="$WORKDIR/download_tmp"
 
+# Optional proxy configuration:
 # export http_proxy="http://proxy.saga:3128/"
 # export https_proxy="http://proxy.saga:3128/"
 # export HTTP_PROXY="$http_proxy"
@@ -15,8 +16,6 @@ export SINGULARITY_CACHEDIR="$CONTAINER_DIR/oci_cache"
 export APPTAINER_CACHEDIR="$SINGULARITY_CACHEDIR"
 export SINGULARITY_TMPDIR="$WORKDIR/singularity_tmp"
 export APPTAINER_TMPDIR="$SINGULARITY_TMPDIR"
-export APPTAINER_QUIET=true
-export SINGULARITY_QUIET=true
 export TMPDIR="$TMP_DIR"
 
 mkdir -p \
@@ -102,16 +101,16 @@ prefix = sys.argv[1] + "--"
 with open(sys.argv[2], encoding="utf-8") as handle:
     payload = json.load(handle)
 
-tags = [
+tags = sorted(
     item["name"]
     for item in payload.get("tags", [])
     if item.get("name", "").startswith(prefix)
-]
+)
 
 if not tags:
     raise SystemExit(1)
 
-print(sorted(tags)[-1])
+print(tags[-1])
 PYTAG
             ) || resolved_tag=""
 
@@ -141,8 +140,9 @@ pull_biocontainer_stable() {
     local stable_name="$1"
     local repository="$2"
     local version_prefix="$3"
-    local fallback_tag="$4"
+    local fallback_tag="${4:-}"
     local output="$CONTAINER_DIR/$stable_name"
+    local source_file="$CONTAINER_DIR/${stable_name}.source.txt"
     local resolved_tag
 
     if [[ -s "$output" ]] && singularity inspect "$output" >/dev/null 2>&1; then
@@ -152,6 +152,18 @@ pull_biocontainer_stable() {
 
     resolved_tag=$(resolve_quay_tag "$repository" "$version_prefix" "$fallback_tag")
     pull_image "$stable_name" "docker://quay.io/biocontainers/${repository}:${resolved_tag}"
+    printf 'repository\t%s\nversion_prefix\t%s\nresolved_tag\t%s\nuri\tdocker://quay.io/biocontainers/%s:%s\n' \
+        "$repository" "$version_prefix" "$resolved_tag" "$repository" "$resolved_tag" > "$source_file"
+}
+
+validate_image_command() {
+    local image="$1"
+    shift
+
+    if ! singularity exec "$image" "$@" >/dev/null 2>&1; then
+        echo "ERROR: required command failed inside image: $image :: $*" >&2
+        return 1
+    fi
 }
 
 validate_gzip() {
@@ -185,7 +197,7 @@ with gzip.open(sys.argv[1], "rt", encoding="utf-8", errors="replace") as handle:
     for line in handle:
         if line.startswith("!gaf-version:"):
             has_version = True
-        elif line.startswith("UniProtKB\t"):
+        elif not line.startswith("!") and line.count("\t") >= 14:
             has_annotation = True
         if has_version and has_annotation:
             break
@@ -313,6 +325,16 @@ pull_image \
     'docker://quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
 
 pull_biocontainer_stable \
+    'subread-2.0.8.img' \
+    'subread' \
+    '2.0.8' \
+    ''
+
+validate_image_command \
+    "$CONTAINER_DIR/subread-2.0.8.img" \
+    featureCounts -v
+
+pull_biocontainer_stable \
     'stringtie-3.0.3.img' \
     'stringtie' \
     '3.0.3' \
@@ -384,8 +406,8 @@ download_asset \
     validate_tar_gzip \
     true
 
-# GO assets are deliberately external and versioned. The pipeline records
-# ontology/GAF metadata and SHA-256 checksums in the final GO report.
+# GO assets are external and versioned. The pipeline records ontology/GAF
+# metadata and checksums in its GO reports.
 download_asset \
     'https://purl.obolibrary.org/obo/go/go-basic.obo' \
     "$REFERENCE_DIR/go-basic.obo" \
@@ -400,8 +422,7 @@ download_asset \
     validate_gaf_gzip \
     false
 
-cat > "$REFERENCE_DIR/downloaded_assets.sha256" <<EOF
-$(sha256sum \
+sha256sum \
     "$REFERENCE_DIR/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz" \
     "$REFERENCE_DIR/Homo_sapiens.GRCh38.111.gtf.gz" \
     "$REFERENCE_DIR/Homo_sapiens.GRCh38.cdna.all.fa.gz" \
@@ -410,8 +431,14 @@ $(sha256sum \
     "$REFERENCE_DIR/human_reviewed_isoforms.fasta.gz" \
     "$REFERENCE_DIR/arriba_v2.4.0.tar.gz" \
     "$REFERENCE_DIR/go-basic.obo" \
-    "$REFERENCE_DIR/goa_human.gaf.gz")
-EOF
+    "$REFERENCE_DIR/goa_human.gaf.gz" \
+    > "$REFERENCE_DIR/downloaded_assets.sha256"
 
-printf 'All 15 containers and all 9 reference assets are valid.\n'
+find "$CONTAINER_DIR" -maxdepth 1 -type f -name '*.img' -print0 \
+    | sort -z \
+    | xargs -0 sha256sum \
+    > "$CONTAINER_DIR/downloaded_containers.sha256"
+
+printf 'All 16 containers and all 9 reference assets are valid.\n'
 printf 'Reference checksums: %s\n' "$REFERENCE_DIR/downloaded_assets.sha256"
+printf 'Container checksums: %s\n' "$CONTAINER_DIR/downloaded_containers.sha256"

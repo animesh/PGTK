@@ -9,20 +9,23 @@ assets=(root/'download_assets.sh').read_text()
 processes=re.findall(r'^process\s+(\w+)\s*\{',main,re.M)
 robust=config.split('    robust {',1)[1].rsplit('\n    }\n}',1)[0]
 selectors=re.findall(r'withName:\s*(\w+)\s*\{',robust)
-assert len(processes)==57 and len(set(processes))==57
+assert len(processes)==64 and len(set(processes))==64
 assert set(processes)==set(selectors),(set(processes)-set(selectors),set(selectors)-set(processes))
 assert "queue = {" in config
-assert 'task.cpus > pgtkEffectiveNormalCpuThreshold || task.memory > pgtkEffectiveNormalMemoryThresholdGb.GB' in config
-assert "requiredEnv('PGTK_NORMAL_PARTITION')" in config
-assert "requiredEnv('PGTK_BIGMEM_PARTITION')" in config
-assert "requiredEnv('PGTK_MAX_CPUS')" in config
-assert "requiredEnv('PGTK_MAX_MEMORY_GB')" in config
-assert 'Math.min(pgtkMaxCpus' in config
-assert 'value > pgtkEffectiveMaxMemoryGb.GB ? pgtkEffectiveMaxMemoryGb.GB : value' in config
-assert 'pgtkAbsoluteNormalCpuThreshold = 20' in config
-assert 'pgtkAbsoluteNormalMemoryThresholdGb = 160' in config
-assert 'pgtkAbsoluteMaxCpus = 32' in config
-assert 'pgtkAbsoluteMaxMemoryGb = 512' in config
+assert not re.search(r'^def\s+', config, re.M)
+assert config.startswith('/*')
+assert 'requiredEnv' not in config
+assert not re.search(r'\bpgtk[A-Z]', config)
+assert "task.cpus > Math.min((env('PGTK_NORMAL_CPU_THRESHOLD') as int), 20)" in config
+assert "task.memory > Math.min((env('PGTK_NORMAL_MEMORY_THRESHOLD_GB') as int), 160).GB" in config
+assert "env('PGTK_NORMAL_PARTITION')" in config
+assert "env('PGTK_BIGMEM_PARTITION')" in config
+assert "env('PGTK_MAX_CPUS')" in config
+assert "env('PGTK_MAX_MEMORY_GB')" in config
+assert "Math.min((env('PGTK_MAX_CPUS') as int), 32)" in config
+assert "value > Math.min((env('PGTK_MAX_MEMORY_GB') as int), 512).GB" in config
+assert "queueSize = env('PGTK_QUEUE_SIZE') as int" in config
+assert "submitRateLimit = env('PGTK_SUBMIT_RATE_LIMIT')" in config
 assert 'maxRetries = 2' in config
 assert "task.exitStatus in [137, 140, 143] ? 'retry' : 'terminate'" in config
 assert not re.search(r"queue\s*=\s*'(normal|bigmem)'",config)
@@ -47,6 +50,46 @@ assert 'goa_human.gaf.gz' in assets
 assert 'validate_obo()' in assets
 assert 'validate_gaf_gzip()' in assets
 assert 'downloaded_assets.sha256' in assets
+assert "'subread-2.0.8.img'" in assets
+assert 'featureCounts -v' in assets
+assert '${params.container_cache}/subread-2.0.8.img' in main
+assert 'subread:2.0.8--he4a0461_1' not in main
+assert not re.search(r'^\s*tuple val\(meta\)\s*$', main, re.M)
+assert 'expression_ora_inputs = expression_metadata' in main
+assert 'expression_ora_inputs = expression_metadata.map { meta -> tuple(meta) }' not in main
+assert 'process ANALYZE_EXPRESSION_SAMPLE_GO {' in main
+assert 'process ANALYZE_EXPRESSION_RANKED_GO {' in main
+assert 'process MERGE_EXPRESSION_GO {' in main
+assert 'process PREPARE_EXPRESSION_MULTIQC_CONTENT {' in main
+assert 'final_multiqc_inputs = comparative_multiqc.mix(expression_multiqc_content).collect()' in main
+assert 'process ANALYZE_EXPRESSION_GO {' not in main
+assert 'params.go_fdr_threshold = 0.1' in main
+assert main.count('--fdr-threshold ${params.go_fdr_threshold}') == 4
+assert 'params.expression_rank_min_nonzero_scores = 1' in main
+assert '--min-nonzero-scores ${params.expression_rank_min_nonzero_scores}' in main
+expression_go=(root/'expression_go_analysis.py').read_text()
+progression_go=(root/'analyze_progression_biology.py').read_text()
+progression_merge=(root/'merge_progression_biology.py').read_text()
+assert expression_go.count("default=0.1") == 3
+assert "_all', item['sample'], complete" in expression_go
+assert "'FDRThreshold': args.fdr_threshold" in expression_go
+assert "baseline_column = f'{args.baseline_sample}_TPM'" in expression_go
+assert "float(row[baseline_column])" in expression_go
+assert '--sample and --baseline-sample must be different' in expression_go
+assert '--min-nonzero-scores' in expression_go
+assert "'NonZeroScores': nonzero_scores" in expression_go
+assert "default=0.1" in progression_go
+assert "'FDRThreshold':a.fdr_threshold" in progression_go
+assert 'SignificantGOTermsFDR05' not in progression_go
+assert 'SignificantGOTermsFDR05' not in progression_merge
+assert 'scipy' not in (root/'expression_go_analysis.py').read_text()
+assert 'math.comb' not in (root/'expression_go_analysis.py').read_text()
+assert 'math.comb' not in (root/'analyze_progression_biology.py').read_text()
+assert 'HOST_PYTHON_STDLIB_OK' in (root/'validate_runtime_inputs.py').read_text()
+assert 'scipy' not in (root/'analyze_progression_biology.py').read_text()
+assert "'*multiqc-1.35*img'" in (root/'validate_runtime_inputs.py').read_text()
+assert "expression_go_analysis.py'), '--help'" in (root/'validate_runtime_inputs.py').read_text()
+assert "analyze_progression_biology.py'), '--help'" in (root/'validate_runtime_inputs.py').read_text()
 assert 'DEFAULT_CATEGORIES' not in (root/'analyze_progression_biology.py').read_text()
 assert 'trap finalize EXIT' in slurm
 assert '--host_python "$HOST_PYTHON"' in slurm

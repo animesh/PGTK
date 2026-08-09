@@ -38,6 +38,30 @@ params.go_obo = "${projectDir}/reference_downloads/go-basic.obo"
 params.go_gaf = "${projectDir}/reference_downloads/goa_human.gaf.gz"
 params.go_min_size = 10
 params.go_max_size = 500
+params.go_fdr_threshold = 0.1
+params.go_namespaces = 'all'
+params.run_expression_go = true
+params.gene_count_feature_type = 'exon'
+params.gene_count_id_attribute = 'gene_id'
+params.gene_count_symbol_attribute = 'gene_name'
+params.gene_count_biotypes = 'all'
+params.gene_count_strandedness = 0
+params.gene_count_min_mapq = 10
+params.gene_count_min_overlap = 1
+params.gene_count_count_read_pairs = true
+params.gene_count_require_both_ends = false
+params.gene_count_exclude_chimeric = true
+params.gene_count_primary_only = true
+params.gene_count_allow_multi_overlap = false
+params.gene_count_count_multimapping = false
+params.expression_pseudocount = 0.5
+params.expression_cpm_threshold = 1.0
+params.expression_tpm_threshold = 0.0
+params.expression_rank_metric = 'log2_tpm_fold_change'
+params.expression_rank_min_nonzero_scores = 1
+params.go_expression_background = 'genome'
+params.go_variant_background = 'genome'
+params.go_variant_biotypes = 'protein_coding'
 
 
 def resolveExternalVcf(String directory, String srr, String suffix) {
@@ -1055,6 +1079,243 @@ process PROGRESSION_SUBTRACT {
     """
 }
 
+process COUNT_GENES_PER_SAMPLE {
+    tag "${meta.sample}:gene_counts"
+    cpus 4; memory '4 GB'; time '4h'; disk '100 GB'
+    container "${params.container_cache}/subread-2.0.8.img"
+    publishDir "${params.outdir}/expression/per_sample", mode:'copy'
+    input:
+    tuple val(meta), path(bam), path(bai)
+    path gtf
+    output:
+    tuple val(meta), path("${meta.sample}.gene_counts.tsv"), path("${meta.sample}.gene_counts.tsv.summary")
+    script:
+    def paired = params.gene_count_count_read_pairs ? '-p --countReadPairs' : ''
+    def bothEnds = params.gene_count_require_both_ends ? '-B' : ''
+    def chimeric = params.gene_count_exclude_chimeric ? '-C' : ''
+    def primary = params.gene_count_primary_only ? '--primary' : ''
+    def overlap = params.gene_count_allow_multi_overlap ? '-O' : ''
+    def multi = params.gene_count_count_multimapping ? '-M' : ''
+    """
+    set -euo pipefail
+    featureCounts \
+        -T ${task.cpus} \
+        -a ${gtf} \
+        -o ${meta.sample}.gene_counts.tsv \
+        -t ${params.gene_count_feature_type} \
+        -g ${params.gene_count_id_attribute} \
+        -s ${params.gene_count_strandedness} \
+        -Q ${params.gene_count_min_mapq} \
+        --minOverlap ${params.gene_count_min_overlap} \
+        ${paired} ${bothEnds} ${chimeric} ${primary} ${overlap} ${multi} \
+        ${bam}
+    test -s ${meta.sample}.gene_counts.tsv
+    test -s ${meta.sample}.gene_counts.tsv.summary
+    """
+}
+
+process MERGE_GENE_EXPRESSION {
+    tag 'merge_gene_expression'
+    cpus 1; memory '8 GB'; time '4h'; disk '30 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/expression", mode:'copy'
+    input:
+    path count_tables
+    path gtf
+    path analysis_script
+    output:
+    path 'gene_expression.gene_expression.tsv', emit: matrix
+    path 'gene_expression.summary.tsv', emit: summary
+    script:
+    """
+    set -euo pipefail
+    "${params.host_python}" ${analysis_script} merge-counts \
+        --counts ${count_tables} \
+        --gtf ${gtf} \
+        --feature-type ${params.gene_count_feature_type} \
+        --id-attribute ${params.gene_count_id_attribute} \
+        --symbol-attribute ${params.gene_count_symbol_attribute} \
+        --biotypes ${params.gene_count_biotypes} \
+        --output-prefix gene_expression
+    """
+}
+
+process ANALYZE_EXPRESSION_SAMPLE_GO {
+    tag "${meta.sample}:expressed_GO"
+    cpus 1; memory '2 GB'; time '1h'; disk '20 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/expression/go/per_sample", mode:'copy'
+    input:
+    val(meta)
+    path expression_matrix
+    val all_samples
+    path go_mapping
+    path analysis_script
+    output:
+    tuple val(meta), path("${meta.sample}.expression_go.expression_ora.tsv"), path("${meta.sample}.expression_go.summary.tsv")
+    script:
+    """
+    set -euo pipefail
+    "${params.host_python}" ${analysis_script} sample-ora \
+        --matrix ${expression_matrix} \
+        --sample ${meta.sample} \
+        --subject ${meta.tk} \
+        --group ${meta.group} \
+        --all-samples '${all_samples}' \
+        --go-mapping ${go_mapping} \
+        --background ${params.go_expression_background} \
+        --cpm-threshold ${params.expression_cpm_threshold} \
+        --tpm-threshold ${params.expression_tpm_threshold} \
+        --go-min-size ${params.go_min_size} \
+        --go-max-size ${params.go_max_size} \
+        --fdr-threshold ${params.go_fdr_threshold} \
+        --namespaces ${params.go_namespaces} \
+        --output-prefix ${meta.sample}.expression_go
+    """
+}
+
+process ANALYZE_EXPRESSION_RANKED_GO {
+    tag "${meta.tk}:${meta.sample}_vs_${baseline_sample}:ranked_GO"
+    cpus 1; memory '2 GB'; time '1h'; disk '20 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/expression/go/ranked", mode:'copy'
+    input:
+    tuple val(meta), val(baseline_sample)
+    path expression_matrix
+    val all_samples
+    path go_mapping
+    path analysis_script
+    output:
+    tuple val(meta), val(baseline_sample), path("${meta.sample}_vs_${baseline_sample}.expression_go.ranked_go.tsv"), path("${meta.sample}_vs_${baseline_sample}.expression_go.summary.tsv")
+    script:
+    """
+    set -euo pipefail
+    "${params.host_python}" ${analysis_script} ranked-go \
+        --matrix ${expression_matrix} \
+        --sample ${meta.sample} \
+        --baseline-sample ${baseline_sample} \
+        --subject ${meta.tk} \
+        --group ${meta.group} \
+        --all-samples '${all_samples}' \
+        --go-mapping ${go_mapping} \
+        --background ${params.go_expression_background} \
+        --pseudocount ${params.expression_pseudocount} \
+        --rank-metric ${params.expression_rank_metric} \
+        --min-nonzero-scores ${params.expression_rank_min_nonzero_scores} \
+        --go-min-size ${params.go_min_size} \
+        --go-max-size ${params.go_max_size} \
+        --fdr-threshold ${params.go_fdr_threshold} \
+        --namespaces ${params.go_namespaces} \
+        --output-prefix ${meta.sample}_vs_${baseline_sample}.expression_go
+    """
+}
+
+process MERGE_EXPRESSION_GO {
+    tag 'merge_expression_GO'
+    cpus 1; memory '2 GB'; time '1h'; disk '20 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/expression/go", mode:'copy'
+    input:
+    path ora_tables
+    path ranked_tables
+    path summary_tables
+    path samplesheet
+    path analysis_script
+    output:
+    path 'expression_go.expression_ora.tsv', emit: ora
+    path 'expression_go.ranked_go.tsv', emit: ranked
+    path 'expression_go.summary.tsv', emit: summary
+    script:
+    """
+    set -euo pipefail
+    "${params.host_python}" ${analysis_script} merge-expression-go \
+        --samples ${samplesheet} \
+        --ora ${ora_tables} \
+        --ranked ${ranked_tables} \
+        --summary ${summary_tables} \
+        --output-prefix expression_go
+    """
+}
+
+process PREPARE_EXPRESSION_MULTIQC_CONTENT {
+    tag 'expression_GO_multiqc_content'
+    cpus 1; memory '1 GB'; time '1h'; disk '10 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    input:
+    path expression_ora
+    path ranked_go
+    path expression_summary
+    path variant_set_go
+    path variant_set_summary
+    output:
+    path 'expression_multiqc_content'
+    script:
+    """
+    set -euo pipefail
+    mkdir expression_multiqc_content
+    cp ${expression_summary} expression_multiqc_content/expression_go_summary_mqc.tsv
+    cp ${expression_ora} expression_multiqc_content/expression_go_ora_mqc.tsv
+    cp ${ranked_go} expression_multiqc_content/expression_ranked_go_mqc.tsv
+    cp ${variant_set_summary} expression_multiqc_content/progression_variant_set_go_summary_mqc.tsv
+    cp ${variant_set_go} expression_multiqc_content/progression_variant_set_go_mqc.tsv
+    python - ${expression_summary} ${variant_set_summary} <<'PY_MQC_EXPRESSION'
+import csv
+import html
+import pathlib
+import sys
+
+def table(path):
+    with open(path, encoding='utf-8', newline='') as handle:
+        rows = list(csv.DictReader(handle, delimiter='\t'))
+    if not rows:
+        return '<p>No rows.</p>'
+    fields = list(rows[0])
+    head = ''.join('<th>' + html.escape(field) + '</th>' for field in fields)
+    body = ''.join('<tr>' + ''.join('<td>' + html.escape(str(row.get(field, ''))) + '</td>' for field in fields) + '</tr>' for row in rows)
+    return '<table><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table>'
+
+content = '<h2>Expression and progression-set Gene Ontology analysis</h2>'
+content += '<h3>Expression GO summary</h3>' + table(sys.argv[1])
+content += '<h3>Progression variant-set GO summary</h3>' + table(sys.argv[2])
+pathlib.Path('expression_multiqc_content/22_expression_go_mqc.html').write_text(content, encoding='utf-8')
+PY_MQC_EXPRESSION
+    """
+}
+
+process ANALYZE_PROGRESSION_VARIANT_SETS {
+    tag 'progression_common_and_exclusive_GO'
+    cpus 1; memory '8 GB'; time '8h'; disk '30 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/progression_biology/sets", mode:'copy'
+    input:
+    path sample_gene_tables
+    path samplesheet
+    path go_mapping
+    path gtf
+    path analysis_script
+    output:
+    path 'progression_variant_sets.variant_set_go.tsv', emit: enrichment
+    path 'progression_variant_sets.summary.tsv', emit: summary
+    script:
+    """
+    set -euo pipefail
+    "${params.host_python}" ${analysis_script} variant-sets \
+        --genes ${sample_gene_tables} \
+        --background ${params.go_variant_background} \
+        --samples ${samplesheet} \
+        --go-mapping ${go_mapping} \
+        --gtf ${gtf} \
+        --id-attribute ${params.gene_count_id_attribute} \
+        --symbol-attribute ${params.gene_count_symbol_attribute} \
+        --biotypes ${params.go_variant_biotypes} \
+        --go-min-size ${params.go_min_size} \
+        --go-max-size ${params.go_max_size} \
+        --fdr-threshold ${params.go_fdr_threshold} \
+        --namespaces ${params.go_namespaces} \
+        --output-prefix progression_variant_sets
+    """
+}
+
 process PREPARE_GO_ANNOTATIONS {
     tag 'GO_annotations'
     cpus 1; memory '4 GB'; time '4h'; disk '20 GB'
@@ -1067,7 +1328,7 @@ process PREPARE_GO_ANNOTATIONS {
     script:
     """
     set -euo pipefail
-    python ${preparation_script} --obo ${go_obo} --gaf ${go_gaf} --output-prefix go_annotations
+    "${params.host_python}" ${preparation_script} --obo ${go_obo} --gaf ${go_gaf} --output-prefix go_annotations
     """
 }
 process ANALYZE_PROGRESSION_SAMPLE {
@@ -1084,7 +1345,7 @@ process ANALYZE_PROGRESSION_SAMPLE {
     script:
     """
     set -euo pipefail
-    python ${analysis_script} --sample ${meta.sample} --subject ${meta.tk} --group ${meta.group} --progression-vcf ${progression_vcf} --background-vcf ${background_vcf} --go-mapping ${go_mapping} --go-min-size ${params.go_min_size} --go-max-size ${params.go_max_size} --output-prefix ${meta.sample}.progression_biology
+    "${params.host_python}" ${analysis_script} --sample ${meta.sample} --subject ${meta.tk} --group ${meta.group} --progression-vcf ${progression_vcf} --background-vcf ${background_vcf} --go-mapping ${go_mapping} --go-min-size ${params.go_min_size} --go-max-size ${params.go_max_size} --fdr-threshold ${params.go_fdr_threshold} --output-prefix ${meta.sample}.progression_biology
     """
 }
 process COMPARE_PROGRESSION_PAIR {
@@ -1100,7 +1361,7 @@ process COMPARE_PROGRESSION_PAIR {
     script:
     """
     set -euo pipefail
-    python ${comparison_script} --subject ${pair_meta.subject} --sample-a ${pair_meta.sample_a} --sample-b ${pair_meta.sample_b} --alleles-a ${alleles_a} --alleles-b ${alleles_b} --genes-a ${genes_a} --genes-b ${genes_b} --go-a ${go_a} --go-b ${go_b} --output-prefix ${pair_meta.pair_id}.progression_pair
+    "${params.host_python}" ${comparison_script} --subject ${pair_meta.subject} --sample-a ${pair_meta.sample_a} --sample-b ${pair_meta.sample_b} --alleles-a ${alleles_a} --alleles-b ${alleles_b} --genes-a ${genes_a} --genes-b ${genes_b} --go-a ${go_a} --go-b ${go_b} --output-prefix ${pair_meta.pair_id}.progression_pair
     """
 }
 process MERGE_PROGRESSION_BIOLOGY {
@@ -1127,7 +1388,7 @@ process MERGE_PROGRESSION_BIOLOGY {
     script:
     """
     set -euo pipefail
-    python ${merge_script} --sample-alleles ${sample_alleles} --sample-genes ${sample_genes} --sample-go ${sample_go} --sample-candidates ${sample_candidates} --sample-summary ${sample_summaries} --pair-alleles ${pair_alleles} --pair-genes ${pair_genes} --pair-go ${pair_go} --pair-summary ${pair_summaries} --go-metadata ${go_metadata} --output-prefix progression_biology
+    "${params.host_python}" ${merge_script} --sample-alleles ${sample_alleles} --sample-genes ${sample_genes} --sample-go ${sample_go} --sample-candidates ${sample_candidates} --sample-summary ${sample_summaries} --pair-alleles ${pair_alleles} --pair-genes ${pair_genes} --pair-go ${pair_go} --pair-summary ${pair_summaries} --go-metadata ${go_metadata} --output-prefix progression_biology
     """
 }
 process BUILD_IGV_EVIDENCE_BUNDLE {
@@ -1781,6 +2042,9 @@ workflow {
     star_result=STAR_ALIGN(trimmed,staridx)
     arriba_result=ARRIBA(star_result.bam,refs.genome,refs.gtf,refs.blacklist,refs.known,refs.domains)
     sortedbam=SORT_INDEX_BAM(star_result.bam)
+    expression_analysis_script=file("${projectDir}/expression_go_analysis.py", checkIfExists:true)
+    gene_count_parts=COUNT_GENES_PER_SAMPLE(sortedbam,refs.gtf)
+    gene_expression=MERGE_GENE_EXPRESSION(gene_count_parts.map { m,c,su -> c }.collect(),refs.gtf,expression_analysis_script)
     assembled=STRINGTIE_ASSEMBLY(sortedbam,refs.gtf)
     novel_result=GFFCOMPARE_NOVEL(assembled,refs.gtf)
     rna_validator = file("${projectDir}/validate_rna_events.py", checkIfExists:true)
@@ -1872,6 +2136,61 @@ workflow {
     go_reference=PREPARE_GO_ANNOTATIONS(file(params.go_obo,checkIfExists:true),file(params.go_gaf,checkIfExists:true),go_preparation_script)
     progression_sample_inputs=prog.map { m,nv,nt,bv,bt,sv,st,su -> tuple(m.sample,m,nv,nt) }.join(validated_variants.validated.map { m,v,t -> tuple(m.sample,v,t) }).map { sample,m,nv,nt,rv,rt -> tuple(m,nv,nt,rv,rt) }
     progression_sample_results=ANALYZE_PROGRESSION_SAMPLE(progression_sample_inputs,go_reference.mapping,progression_biology_script)
+    progression_variant_sets=ANALYZE_PROGRESSION_VARIANT_SETS(
+        progression_sample_results.map { m,a,g,e,c,su -> g }.collect(),
+        file(params.samplesheet,checkIfExists:true), go_reference.mapping, refs.gtf, expression_analysis_script
+    )
+    expression_multiqc_content = channel.empty()
+    if (params.run_expression_go) {
+        expression_metadata = channel.fromPath(params.samplesheet, checkIfExists:true)
+            .splitCsv(header:true)
+            .map { row ->
+                def sample = row.sample.trim()
+                def baselineValue = (row.baseline ?: 'false').trim().toLowerCase()
+                [sample:sample, tk:(row.TK ?: sample).trim(), group:(row.Group ?: sample).trim(), baseline:baselineValue]
+            }
+        expression_all_samples = channel.fromPath(params.samplesheet, checkIfExists:true)
+            .splitCsv(header:true)
+            .map { row -> row.sample.trim() }
+            .collect()
+            .map { names -> names.join(',') }
+        expression_ora_inputs = expression_metadata
+        expression_subject_groups = channel.fromPath(params.samplesheet, checkIfExists:true)
+            .splitCsv(header:true)
+            .map { row ->
+                def sample = row.sample.trim()
+                def baselineValue = (row.baseline ?: 'false').trim().toLowerCase()
+                def meta = [sample:sample, tk:(row.TK ?: sample).trim(), group:(row.Group ?: sample).trim(), baseline:baselineValue]
+                tuple(meta.tk, meta)
+            }
+            .groupTuple(by:0)
+        expression_rank_inputs = expression_subject_groups.flatMap { subject, members ->
+            def baselines = members.findAll { it.baseline == 'true' }
+            def progressions = members.findAll { it.baseline == 'false' }
+            if (baselines.size() != 1) return []
+            progressions.collect { meta -> tuple(meta, baselines[0].sample) }
+        }
+        expression_sample_go = ANALYZE_EXPRESSION_SAMPLE_GO(
+            expression_ora_inputs, gene_expression.matrix, expression_all_samples,
+            go_reference.mapping, expression_analysis_script
+        )
+        expression_ranked_go = ANALYZE_EXPRESSION_RANKED_GO(
+            expression_rank_inputs, gene_expression.matrix, expression_all_samples,
+            go_reference.mapping, expression_analysis_script
+        )
+        expression_go = MERGE_EXPRESSION_GO(
+            expression_sample_go.map { m,ora,summary -> ora }.collect(),
+            expression_ranked_go.map { m,b,ranked,summary -> ranked }.collect(),
+            expression_sample_go.map { m,ora,summary -> summary }
+                .mix(expression_ranked_go.map { m,b,ranked,summary -> summary })
+                .collect(),
+            file(params.samplesheet,checkIfExists:true), expression_analysis_script
+        )
+        expression_multiqc_content = PREPARE_EXPRESSION_MULTIQC_CONTENT(
+            expression_go.ora, expression_go.ranked, expression_go.summary,
+            progression_variant_sets.enrichment, progression_variant_sets.summary
+        )
+    }
     progression_pair_left=progression_sample_results.map { m,a,g,e,c,su -> tuple(m.tk,m,a,g,e) }
     progression_pair_right=progression_sample_results.map { m,a,g,e,c,su -> tuple(m.tk,m,a,g,e) }
     progression_pair_inputs=progression_pair_left.combine(progression_pair_right,by:0).filter { subject,ma,aa,ga,ea,mb,ab,gb,eb -> ma.sample < mb.sample }.map { subject,ma,aa,ga,ea,mb,ab,gb,eb -> def pm=[subject:subject,sample_a:ma.sample,sample_b:mb.sample,pair_id:"${subject}.${ma.sample}_vs_${mb.sample}"]; tuple(pm,aa,ga,ea,ab,gb,eb) }
@@ -2016,8 +2335,10 @@ workflow {
             progression_biology.report,
             progression_biology.multiqc_summary
         )
-        MULTIQC_FINAL(qc_files, final_multiqc_content.content)
+        final_multiqc_inputs = final_multiqc_content.content.mix(expression_multiqc_content).collect()
+        MULTIQC_FINAL(qc_files, final_multiqc_inputs)
     } else {
-        MULTIQC_FINAL(qc_files, comparative_multiqc)
+        final_multiqc_inputs = comparative_multiqc.mix(expression_multiqc_content).collect()
+        MULTIQC_FINAL(qc_files, final_multiqc_inputs)
     }
 }

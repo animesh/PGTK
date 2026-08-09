@@ -229,3 +229,44 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Nextflow runtime and generated results
+.nextflow*
+work/
+results/
+resultsbkup*/
+reference_downloads/
+sra_cache/
+singularity_cache/
+sarek/
+sarek_comparison_inputs/
+
+# MaxQuant result directories
+txtMQMBR/
+txtMBRLFQ/
+txtNoMBRnoLFQ/
+txtOld/
+
+# Generated execution reports
+dag-*.html
+report-*.html
+timeline-*.html
+pgtk-wrapper-*.log
+pipeline_command_validation_*.txt
+wget-log
+
+# Local archives and review packages
+*.gz
+*.tgz
+*.tar.gz
+*.zip
+*.tgz.txt
+*.tar.gz.txt
+*.sha256
+
+# Local backups and temporary development directories
+pgtk_complete_fixed_pipeline/
+pgtk_complete_source_for_expression_go/
+pgtk_final_corrections/
+nextflow_previous_*/
+pipeline_history_complete_fix_*/

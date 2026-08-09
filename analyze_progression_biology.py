@@ -28,8 +28,16 @@ def vcf(p):
     anns=[best(x) for x in bg.values()]; pri=best(anns) if anns else {}
     out.append({'Chrom':c[0].removeprefix('chr'),'Pos':int(c[1]),'Ref':c[3],'Alt':alt,'Primary':pri,'AllGenes':';'.join(sorted(bg)),'GT':fmt.get('GT',''),'DP':fmt.get('DP',''),'AD':fmt.get('AD','')})
  return out
+def lc(n,k):return float('-inf') if k<0 or k>n else math.lgamma(n+1)-math.lgamma(k+1)-math.lgamma(n-k+1)
 def fisher(a,b,c,d):
- n=a+b+c+d;r=a+b;k=a+c;den=math.comb(n,r);p=sum(math.comb(k,x)*math.comb(n-k,r-x)/den for x in range(a,min(r,k)+1) if 0<=r-x<=n-k);o=((a+.5)*(d+.5))/((b+.5)*(c+.5));return min(1,p),o
+ n=a+b+c+d;r=a+b;k=a+c;lo=max(a,0,r-(n-k));hi=min(r,k)
+ if lo>hi:return 0.0,0.0
+ q=math.exp(lc(k,lo)+lc(n-k,r-lo)-lc(n,r));p=q;x=lo
+ while x<hi:
+  den=(x+1)*(n-k-r+x+1)
+  if den<=0:break
+  q*=((k-x)*(r-x))/den;p+=q;x+=1
+ o=((a+.5)*(d+.5))/((b+.5)*(c+.5));return min(1.0,max(0.0,p)),o
 def bh(rows):
  order=sorted(range(len(rows)),key=lambda i:rows[i]['PValue']);prev=1.;adj=[1.]*len(rows)
  for z in range(len(order)-1,-1,-1):i=order[z];prev=min(prev,rows[i]['PValue']*len(rows)/(z+1));adj[i]=prev
@@ -37,7 +45,7 @@ def bh(rows):
 def wr(p,rows,fs):
  with open(p,'w',encoding='utf-8',newline='') as h:w=csv.DictWriter(h,fieldnames=fs,delimiter='\t',lineterminator='\n',extrasaction='ignore');w.writeheader();w.writerows(rows)
 def main():
- p=argparse.ArgumentParser();p.add_argument('--sample',required=True);p.add_argument('--subject',required=True);p.add_argument('--group',required=True);p.add_argument('--progression-vcf',required=True);p.add_argument('--background-vcf',required=True);p.add_argument('--go-mapping',required=True);p.add_argument('--go-min-size',type=int,default=10);p.add_argument('--go-max-size',type=int,default=500);p.add_argument('--output-prefix',required=True);a=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument('--sample',required=True);p.add_argument('--subject',required=True);p.add_argument('--group',required=True);p.add_argument('--progression-vcf',required=True);p.add_argument('--background-vcf',required=True);p.add_argument('--go-mapping',required=True);p.add_argument('--go-min-size',type=int,default=10);p.add_argument('--go-max-size',type=int,default=500);p.add_argument('--fdr-threshold',type=float,default=0.1);p.add_argument('--output-prefix',required=True);a=p.parse_args();0.0<=a.fdr_threshold<=1.0 or p.error('--fdr-threshold must be between 0 and 1')
  prog=vcf(a.progression_vcf);back=vcf(a.background_vcf);ars=[]
  for r in prog:
   x=r['Primary'];ars.append({'Sample':a.sample,'Subject':a.subject,'Group':a.group,'Chrom':r['Chrom'],'Pos':r['Pos'],'Ref':r['Ref'],'Alt':r['Alt'],'Gene':x.get('SYMBOL') or x.get('Gene',''),'AllGenes':r['AllGenes'],'Impact':x.get('IMPACT',''),'Consequence':x.get('Consequence',''),'Canonical':x.get('CANONICAL',''),'Feature':x.get('Feature',''),'HGVSc':x.get('HGVSc',''),'HGVSp':x.get('HGVSp',''),'GT':r['GT'],'DP':r['DP'],'AD':r['AD']})
@@ -56,5 +64,5 @@ def main():
  for g in sorted(fg):
   z=[r for r in ars if r['Gene']==g];gr.append({'Sample':a.sample,'Subject':a.subject,'Group':a.group,'Gene':g,'BestImpact':max((r['Impact'] for r in z),key=lambda x:IMPACT.get(x,0)),'Alleles':len(z)})
  cand=[{'PriorityScore':IMPACT.get(r['Impact'],0)*10,**r} for r in ars];cand.sort(key=lambda r:(-r['PriorityScore'],r['Gene'],int(r['Pos'])))
- pre=a.output_prefix;wr(pre+'.alleles.tsv',ars,['Sample','Subject','Group','Chrom','Pos','Ref','Alt','Gene','AllGenes','Impact','Consequence','Canonical','Feature','HGVSc','HGVSp','GT','DP','AD']);wr(pre+'.genes.tsv',gr,['Sample','Subject','Group','Gene','BestImpact','Alleles']);wr(pre+'.go_enrichment.tsv',ers,['Sample','Subject','Group','GO_ID','GO_Name','Namespace','ProgressionGenesInTerm','ProgressionGenesTested','BackgroundGenesInTerm','BackgroundGenesTested','OddsRatio','PValue','FDR','OverlapGenes']);wr(pre+'.candidates.tsv',cand,['PriorityScore','Sample','Subject','Group','Chrom','Pos','Ref','Alt','Gene','AllGenes','Impact','Consequence','Canonical','Feature','HGVSc','HGVSp','GT','DP','AD']);wr(pre+'.summary.tsv',[{'Sample':a.sample,'Subject':a.subject,'Group':a.group,'ProgressionAlleles':len(prog),'ProgressionGenes':len(fg),'GO_TermsTested':len(ers),'SignificantGOTermsFDR05':sum(r['FDR']<=.05 for r in ers)}],['Sample','Subject','Group','ProgressionAlleles','ProgressionGenes','GO_TermsTested','SignificantGOTermsFDR05'])
+ pre=a.output_prefix;wr(pre+'.alleles.tsv',ars,['Sample','Subject','Group','Chrom','Pos','Ref','Alt','Gene','AllGenes','Impact','Consequence','Canonical','Feature','HGVSc','HGVSp','GT','DP','AD']);wr(pre+'.genes.tsv',gr,['Sample','Subject','Group','Gene','BestImpact','Alleles']);wr(pre+'.go_enrichment.tsv',ers,['Sample','Subject','Group','GO_ID','GO_Name','Namespace','ProgressionGenesInTerm','ProgressionGenesTested','BackgroundGenesInTerm','BackgroundGenesTested','OddsRatio','PValue','FDR','OverlapGenes']);wr(pre+'.candidates.tsv',cand,['PriorityScore','Sample','Subject','Group','Chrom','Pos','Ref','Alt','Gene','AllGenes','Impact','Consequence','Canonical','Feature','HGVSc','HGVSp','GT','DP','AD']);wr(pre+'.summary.tsv',[{'Sample':a.sample,'Subject':a.subject,'Group':a.group,'ProgressionAlleles':len(prog),'ProgressionGenes':len(fg),'GO_TermsTested':len(ers),'FDRThreshold':a.fdr_threshold,'SignificantGOTerms':sum(r['FDR']<=a.fdr_threshold for r in ers)}],['Sample','Subject','Group','ProgressionAlleles','ProgressionGenes','GO_TermsTested','FDRThreshold','SignificantGOTerms'])
 if __name__=='__main__':main()
