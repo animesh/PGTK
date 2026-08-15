@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 import argparse
-import bisect
 import csv
 import gzip
 import re
-import subprocess
+import pysam
 import sys
-import tempfile
 from pathlib import Path
 
 
@@ -91,6 +89,23 @@ def observe(fields, position, ref, alt):
     }
 
 
+
+def resolve_contig(alignment, chrom):
+    names = set(alignment.references)
+    plain = chrom[3:] if chrom.startswith('chr') else chrom
+    resolved = next((name for name in (chrom, plain, 'chr' + plain) if name in names), None)
+    if resolved is None:
+        raise ValueError(f'contig not found in BAM: {chrom}')
+    return resolved
+
+
+def read_fields(read, alignment):
+    return [
+        read.query_name or '', str(read.flag), alignment.get_reference_name(read.reference_id),
+        str(read.reference_start + 1), str(read.mapping_quality), read.cigarstring or '*',
+        '*', '0', '0', read.query_sequence or '*', read.qual or '*',
+    ]
+
 def main():
     parser = argparse.ArgumentParser(description='List every RNA alignment supporting each VCF ALT allele, including read and genomic coordinates.')
     parser.add_argument('--vcf', nargs='+', required=True)
@@ -114,60 +129,39 @@ def main():
                     chrom, position, variant_id, ref, alts = fields[:5]
                     for alt in alts.split(','):
                         variants.append((chrom, int(position), variant_id, ref, alt))
-        with tempfile.TemporaryDirectory(prefix='variant_read_provenance_') as temporary:
-            bed = Path(temporary) / 'variants.bed'
-            with bed.open('w') as handle:
-                for chrom, position, _variant_id, _ref, _alt in variants:
-                    handle.write(f'{chrom}\t{position - 1}\t{position}\n')
-            variants_by_chrom = {}
-            positions_by_chrom = {}
-            for variant in variants:
-                variants_by_chrom.setdefault(variant[0], {}).setdefault(variant[1], []).append(variant)
+        variants_by_chrom = {}
+        for variant in variants:
+            variants_by_chrom.setdefault(variant[0], {}).setdefault(variant[1], []).append(variant)
+        with pysam.AlignmentFile(str(bams[sample]), 'rb', threads=max(1, args.threads)) as alignment:
             for chrom, position_map in variants_by_chrom.items():
-                positions_by_chrom[chrom] = sorted(position_map)
-            completed = subprocess.Popen(
-                ['samtools', 'view', '-@', str(args.threads), '-h', '-L', str(bed), str(bams[sample])],
-                stdout=subprocess.PIPE, text=True, bufsize=1024 * 1024,
-            )
-            if completed.stdout is None:
-                raise RuntimeError('samtools view stdout unavailable')
-            for line in completed.stdout:
-                if not line or line.startswith('@'):
-                    continue
-                fields = line.split('\t')
-                if len(fields) < 11:
-                    continue
-                flag = int(fields[1])
-                if flag & 4 or flag & 256 or flag & 2048 or flag & 1024:
-                    continue
-                chrom = fields[2]
-                positions = positions_by_chrom.get(chrom)
-                if not positions:
-                    continue
-                start_pos = int(fields[3])
-                reference_span = sum(length for length, operation in cigar_ops(fields[5]) if operation in 'MDN=X')
-                end_pos = start_pos + reference_span - 1
-                left = bisect.bisect_left(positions, start_pos)
-                right = bisect.bisect_right(positions, end_pos)
-                for position in positions[left:right]:
-                    for _chrom, _position, variant_id, ref, alt in variants_by_chrom[chrom][position]:
-                        observation = observe(fields, position, ref, alt)
-                        if observation['Observed allele'] != alt.upper():
+                bam_chrom = resolve_contig(alignment, chrom)
+                for position in sorted(position_map):
+                    seen = set()
+                    max_ref_length = max(len(variant[3]) for variant in position_map[position])
+                    fetch_end = position - 1 + max(1, max_ref_length)
+                    for read in alignment.fetch(bam_chrom, position - 1, fetch_end):
+                        if read.is_unmapped or read.is_secondary or read.is_supplementary or read.is_duplicate:
                             continue
-                        if observation['Mapping quality'] < args.min_mapping_quality:
+                        if read.mapping_quality < args.min_mapping_quality or not read.cigarstring:
                             continue
-                        if observation['Base quality'] != '' and int(observation['Base quality']) < args.min_base_quality:
+                        read_key = (read.query_name, read.flag, read.reference_start, read.cigarstring)
+                        if read_key in seen:
                             continue
-                        fastq = f'{sample}_{observation["Mate"]}.fastq.gz' if observation['Mate'] in {'R1','R2'} else f'{sample}.fastq.gz'
-                        output.append({
-                            'Sample': sample, 'SRA': samples.get(sample, {}).get('SRA', ''), 'Source FASTQ': fastq,
-                            'Variant': f'{chrom}:{position}:{ref}>{alt}', 'Variant ID': variant_id,
-                            'Chromosome': chrom, 'Variant genome position': position, 'REF': ref, 'ALT': alt,
-                            **observation,
-                        })
-            return_code = completed.wait()
-            if return_code != 0:
-                raise RuntimeError(f'samtools view failed with exit status {return_code}')
+                        seen.add(read_key)
+                        fields = read_fields(read, alignment)
+                        for _chrom, _position, variant_id, ref, alt in position_map[position]:
+                            observation = observe(fields, position, ref, alt)
+                            if observation['Observed allele'] != alt.upper():
+                                continue
+                            if observation['Base quality'] != '' and int(observation['Base quality']) < args.min_base_quality:
+                                continue
+                            fastq = f'{sample}_{observation["Mate"]}.fastq.gz' if observation['Mate'] in {'R1','R2'} else f'{sample}.fastq.gz'
+                            output.append({
+                                'Sample': sample, 'SRA': samples.get(sample, {}).get('SRA', ''), 'Source FASTQ': fastq,
+                                'Variant': f'{chrom}:{position}:{ref}>{alt}', 'Variant ID': variant_id,
+                                'Chromosome': chrom, 'Variant genome position': position, 'REF': ref, 'ALT': alt,
+                                **observation,
+                            })
     unique = {}
     for row in output:
         key = (row['Sample'], row['Variant'], row['Read name'], row['Mate'], row['Genome alignment start'], row['CIGAR'])

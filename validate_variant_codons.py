@@ -4,7 +4,7 @@ import bisect
 import csv
 import gzip
 import re
-import subprocess
+import pysam
 import sys
 import tempfile
 from collections import Counter
@@ -116,42 +116,53 @@ def alignment_observation(fields, position, ref, alt, min_base_quality):
             read_pos += length
     return ''
 
-def stream_alignment_counts(bam, records, minimum_base_quality, minimum_mapping_quality, threads, bed):
+def resolve_contig(alignment, chrom):
+    names = set(alignment.references)
+    plain = chrom[3:] if chrom.startswith('chr') else chrom
+    resolved = next((name for name in (chrom, plain, 'chr' + plain) if name in names), None)
+    if resolved is None:
+        raise ValueError(f'contig not found in BAM: {chrom}')
+    return resolved
+
+
+def read_fields(read, alignment):
+    sequence = read.query_sequence or '*'
+    qualities = read.qual or '*'
+    return [
+        read.query_name or '', str(read.flag), alignment.get_reference_name(read.reference_id),
+        str(read.reference_start + 1), str(read.mapping_quality), read.cigarstring or '*',
+        '*', '0', '0', sequence, qualities,
+    ]
+
+
+def stream_alignment_counts(bam, records, minimum_base_quality, minimum_mapping_quality, threads, bed=None):
+    del bed
     variants_by_chrom = {}
-    positions_by_chrom = {}
     for chrom, pos, _vid, ref, alts, _info in records:
         for alt in alts.split(','):
             variants_by_chrom.setdefault(chrom, {}).setdefault(pos, []).append((ref, alt))
-    for chrom, mapping in variants_by_chrom.items():
-        positions_by_chrom[chrom] = sorted(mapping)
     counts = {}
-    process = subprocess.Popen(
-        ['samtools','view','-@',str(threads),'-h','-L',str(bed),str(bam)],
-        stdout=subprocess.PIPE, text=True, bufsize=1024 * 1024,
-    )
-    if process.stdout is None:
-        raise RuntimeError('samtools view stdout unavailable')
-    for line in process.stdout:
-        if not line or line.startswith('@'):
-            continue
-        fields = line.rstrip('\n').split('\t')
-        if len(fields) < 11:
-            continue
-        flag = int(fields[1]); mapq = int(fields[4])
-        if flag & 4 or flag & 256 or flag & 2048 or flag & 1024 or mapq < minimum_mapping_quality:
-            continue
-        chrom = fields[2]; positions = positions_by_chrom.get(chrom)
-        if not positions:
-            continue
-        start = int(fields[3])
-        end = start + sum(length for length, operation in cigar_ops(fields[5]) if operation in 'MDN=X') - 1
-        for pos in positions[bisect.bisect_left(positions,start):bisect.bisect_right(positions,end)]:
-            for ref, alt in variants_by_chrom[chrom][pos]:
-                observed = alignment_observation(fields, pos, ref, alt, minimum_base_quality)
-                if observed:
-                    counts.setdefault((chrom,pos,ref,alt), Counter())[observed] += 1
-    if process.wait() != 0:
-        raise RuntimeError('samtools view failed')
+    with pysam.AlignmentFile(str(bam), 'rb', threads=max(1, threads)) as alignment:
+        for chrom, position_map in variants_by_chrom.items():
+            bam_chrom = resolve_contig(alignment, chrom)
+            for position in sorted(position_map):
+                seen = set()
+                max_ref_length = max(len(ref) for ref, _alt in position_map[position])
+                fetch_end = position - 1 + max(1, max_ref_length)
+                for read in alignment.fetch(bam_chrom, position - 1, fetch_end):
+                    if read.is_unmapped or read.is_secondary or read.is_supplementary or read.is_duplicate:
+                        continue
+                    if read.mapping_quality < minimum_mapping_quality or not read.cigarstring:
+                        continue
+                    read_key = (read.query_name, read.flag, read.reference_start, read.cigarstring)
+                    if read_key in seen:
+                        continue
+                    seen.add(read_key)
+                    fields = read_fields(read, alignment)
+                    for ref, alt in position_map[position]:
+                        observed = alignment_observation(fields, position, ref, alt, minimum_base_quality)
+                        if observed:
+                            counts.setdefault((chrom, position, ref, alt), Counter())[observed] += 1
     return counts
 
 def write_tsv(path, rows, fields):
@@ -191,13 +202,14 @@ def main():
             with bed.open('w') as bed_handle, regions.open('w') as region_handle:
                 for chrom, pos, _vid, ref, _alts, _info in records:
                     bed_handle.write(f'{chrom}\t{pos-1}\t{pos}\n'); region_handle.write(f'{chrom}:{pos}-{pos+len(ref)-1}\n')
-            reference_run = subprocess.run(['samtools','faidx','-r',str(regions),str(args.genome)], check=True, text=True, capture_output=True)
-            references = []; sequence = []
-            for line in reference_run.stdout.splitlines():
-                if line.startswith('>'):
-                    if sequence: references.append(''.join(sequence).upper()); sequence = []
-                else: sequence.append(line.strip())
-            if sequence: references.append(''.join(sequence).upper())
+            references = []
+            with pysam.FastaFile(args.genome) as fasta:
+                names=set(fasta.references)
+                for chrom,pos,_vid,ref,_alts,_info in records:
+                    plain=chrom[3:] if chrom.startswith('chr') else chrom
+                    resolved=next((x for x in (chrom,plain,'chr'+plain) if x in names),None)
+                    if resolved is None: raise ValueError(f'contig not found: {chrom}')
+                    references.append(fasta.fetch(resolved,pos-1,pos-1+len(ref)).upper())
             alignment_counts = stream_alignment_counts(
                 bams[sample], records, args.min_base_quality, args.min_mapping_quality,
                 args.threads, bed,

@@ -28,12 +28,35 @@ params.haplotype_scatter_count = 24
 params.hc_calling_confidence = 20
 params.hc_dont_use_soft_clipped_bases = true
 params.hc_pcr_indel_model = 'CONSERVATIVE'
+params.snp_filter_qd = 2.0
+params.snp_filter_fs = 60.0
+params.snp_filter_sor = 3.0
+params.snp_filter_mq = 40.0
+params.snp_filter_mq_rank_sum = -12.5
+params.snp_filter_read_pos_rank_sum = -8.0
+params.indel_filter_qd = 2.0
+params.indel_filter_fs = 200.0
+params.indel_filter_sor = 10.0
+params.indel_filter_read_pos_rank_sum = -20.0
+params.finding_review_mapq = 20
+params.finding_review_baseq = 20
+params.finding_review_reference_reads = 20
+params.finding_classes = 'rna_variant,progression_variant'
+params.finding_primary_class_order = 'rna_variant,progression_variant'
+params.finding_priority_mode = 'all'
+params.finding_priority_genes = ''
+params.finding_priority_impacts = ''
+params.finding_priority_consequences = ''
+params.generate_priority_igv_reports = true
+params.igv_report_limit = 0
+params.igv_report_timeout_seconds = 600
+params.igv_report_title_prefix = 'PGTK finding'
 params.run_external_vcf_comparison = false
 params.external_vcf_dir = "${projectDir}/sarek"
 params.external_vcf_suffix = '.haplotypecaller.vcf.gz'
-params.host_python = null
 params.reference_downloads = null
 params.container_cache = null
+params.pysam_image = null
 params.go_obo = "${projectDir}/reference_downloads/go-basic.obo"
 params.go_gaf = "${projectDir}/reference_downloads/goa_human.gaf.gz"
 params.go_min_size = 10
@@ -522,28 +545,136 @@ process GATHER_HAPLOTYPE_GVCF {
     """
 }
 
-process GENOTYPE_FILTER {
-    tag "${meta.sample}"; cpus 1; memory '2 GB'; time '8h'; disk '50 GB'
+process GENOTYPE_VARIANTS {
+    tag "${meta.sample}:genotype"
+    cpus 2; memory '8 GB'; time '8h'; disk '80 GB'
     container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
-    publishDir "${params.outdir}/vcf_raw", mode:'copy', pattern:'*.raw.vcf.gz*'
-    publishDir "${params.outdir}/vcf_filtered", mode:'copy', pattern:'*.filtered.vcf.gz*'
-    publishDir "${params.outdir}/vcf_pass", mode:'copy', pattern:'*.pass.vcf.gz*'
+    publishDir "${params.outdir}/vcf_raw", mode:'copy'
     input: tuple val(meta), path(gvcf), path(tbi); tuple path(genome), path(fai), path(dict)
-    output:
-    tuple val(meta), path("${meta.sample}.raw.vcf.gz"), path("${meta.sample}.raw.vcf.gz.tbi"), emit: raw
-    tuple val(meta), path("${meta.sample}.filtered.vcf.gz"), path("${meta.sample}.filtered.vcf.gz.tbi"), emit: filtered
-    tuple val(meta), path("${meta.sample}.pass.vcf.gz"), path("${meta.sample}.pass.vcf.gz.tbi"), emit: pass
+    output: tuple val(meta), path("${meta.sample}.raw.vcf.gz"), path("${meta.sample}.raw.vcf.gz.tbi")
     script:
     def javaHeapGb = Math.max(1, Math.floor(task.memory.toGiga() * 0.80) as int)
     """
     set -euo pipefail
-    mkdir -p gatk_tmp
-    trap 'rm -rf gatk_tmp' EXIT
-    gatk --java-options "-Xms1g -Xmx${javaHeapGb}g -Djava.io.tmpdir=\${PWD}/gatk_tmp" GenotypeGVCFs -R ${genome} -V ${gvcf} -O ${meta.sample}.raw.vcf.gz
+    gatk --java-options "-Xms1g -Xmx${javaHeapGb}g" GenotypeGVCFs \
+        -R ${genome} -V ${gvcf} -O ${meta.sample}.raw.vcf.gz
     test -s ${meta.sample}.raw.vcf.gz.tbi || gatk IndexFeatureFile -I ${meta.sample}.raw.vcf.gz
-    gatk --java-options "-Xms1g -Xmx${javaHeapGb}g -Djava.io.tmpdir=\${PWD}/gatk_tmp" VariantFiltration -R ${genome} -V ${meta.sample}.raw.vcf.gz --window 35 --cluster 3 --filter-expression 'QD < 2.0' --filter-name QD2 --filter-expression 'FS > 30.0' --filter-name FS30 --filter-expression 'MQ < 40.0' --filter-name MQ40 --filter-expression 'MQRankSum < -12.5' --filter-name MQRankSum-12.5 --filter-expression 'ReadPosRankSum < -8.0' --filter-name ReadPos-8 -O ${meta.sample}.filtered.vcf.gz
+    test -s ${meta.sample}.raw.vcf.gz
+    test -s ${meta.sample}.raw.vcf.gz.tbi
+    """
+}
+
+process NORMALIZE_VARIANTS {
+    tag "${meta.sample}:normalize"
+    cpus 2; memory '8 GB'; time '8h'; disk '80 GB'
+    container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
+    publishDir "${params.outdir}/vcf_normalized", mode:'copy'
+    input: tuple val(meta), path(vcf), path(tbi); tuple path(genome), path(fai), path(dict)
+    output: tuple val(meta), path("${meta.sample}.normalized.vcf.gz"), path("${meta.sample}.normalized.vcf.gz.tbi")
+    script:
+    """
+    set -euo pipefail
+    gatk LeftAlignAndTrimVariants -R ${genome} -V ${vcf} \
+        -O ${meta.sample}.normalized.vcf.gz --split-multi-allelics true
+    test -s ${meta.sample}.normalized.vcf.gz.tbi || gatk IndexFeatureFile -I ${meta.sample}.normalized.vcf.gz
+    """
+}
+
+process SELECT_SNPS {
+    tag "${meta.sample}:snps"
+    cpus 1; memory '4 GB'; time '4h'; disk '40 GB'
+    container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
+    publishDir "${params.outdir}/vcf_snp/raw", mode:'copy'
+    input: tuple val(meta), path(vcf), path(tbi); tuple path(genome), path(fai), path(dict)
+    output: tuple val(meta), path("${meta.sample}.snp.raw.vcf.gz"), path("${meta.sample}.snp.raw.vcf.gz.tbi")
+    script:
+    """
+    set -euo pipefail
+    gatk SelectVariants -R ${genome} -V ${vcf} --select-type-to-include SNP -O ${meta.sample}.snp.raw.vcf.gz
+    test -s ${meta.sample}.snp.raw.vcf.gz.tbi || gatk IndexFeatureFile -I ${meta.sample}.snp.raw.vcf.gz
+    """
+}
+
+process SELECT_INDELS {
+    tag "${meta.sample}:indels"
+    cpus 1; memory '4 GB'; time '4h'; disk '40 GB'
+    container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
+    publishDir "${params.outdir}/vcf_indel/raw", mode:'copy'
+    input: tuple val(meta), path(vcf), path(tbi); tuple path(genome), path(fai), path(dict)
+    output: tuple val(meta), path("${meta.sample}.indel.raw.vcf.gz"), path("${meta.sample}.indel.raw.vcf.gz.tbi")
+    script:
+    """
+    set -euo pipefail
+    gatk SelectVariants -R ${genome} -V ${vcf} --select-type-to-include INDEL -O ${meta.sample}.indel.raw.vcf.gz
+    test -s ${meta.sample}.indel.raw.vcf.gz.tbi || gatk IndexFeatureFile -I ${meta.sample}.indel.raw.vcf.gz
+    """
+}
+
+process FILTER_SNPS {
+    tag "${meta.sample}:filter_snps"
+    cpus 1; memory '4 GB'; time '4h'; disk '40 GB'
+    container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
+    publishDir "${params.outdir}/vcf_snp/filtered", mode:'copy', pattern:'*.snp.filtered.vcf.gz*'
+    publishDir "${params.outdir}/vcf_snp/pass", mode:'copy', pattern:'*.snp.pass.vcf.gz*'
+    input: tuple val(meta), path(vcf), path(tbi); tuple path(genome), path(fai), path(dict)
+    output: tuple val(meta), path("${meta.sample}.snp.filtered.vcf.gz"), path("${meta.sample}.snp.filtered.vcf.gz.tbi"), path("${meta.sample}.snp.pass.vcf.gz"), path("${meta.sample}.snp.pass.vcf.gz.tbi")
+    script:
+    """
+    set -euo pipefail
+    gatk VariantFiltration -R ${genome} -V ${vcf} \
+        --filter-name SNP_QD2 --filter-expression 'QD < ${params.snp_filter_qd}' \
+        --filter-name SNP_FS60 --filter-expression 'FS > ${params.snp_filter_fs}' \
+        --filter-name SNP_SOR3 --filter-expression 'SOR > ${params.snp_filter_sor}' \
+        --filter-name SNP_MQ40 --filter-expression 'MQ < ${params.snp_filter_mq}' \
+        --filter-name SNP_MQRankSum-12.5 --filter-expression 'MQRankSum < ${params.snp_filter_mq_rank_sum}' \
+        --filter-name SNP_ReadPosRankSum-8 --filter-expression 'ReadPosRankSum < ${params.snp_filter_read_pos_rank_sum}' \
+        -O ${meta.sample}.snp.filtered.vcf.gz
+    test -s ${meta.sample}.snp.filtered.vcf.gz.tbi || gatk IndexFeatureFile -I ${meta.sample}.snp.filtered.vcf.gz
+    gatk SelectVariants -R ${genome} -V ${meta.sample}.snp.filtered.vcf.gz --exclude-filtered -O ${meta.sample}.snp.pass.vcf.gz
+    test -s ${meta.sample}.snp.pass.vcf.gz.tbi || gatk IndexFeatureFile -I ${meta.sample}.snp.pass.vcf.gz
+    """
+}
+
+process FILTER_INDELS {
+    tag "${meta.sample}:filter_indels"
+    cpus 1; memory '4 GB'; time '4h'; disk '40 GB'
+    container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
+    publishDir "${params.outdir}/vcf_indel/filtered", mode:'copy', pattern:'*.indel.filtered.vcf.gz*'
+    publishDir "${params.outdir}/vcf_indel/pass", mode:'copy', pattern:'*.indel.pass.vcf.gz*'
+    input: tuple val(meta), path(vcf), path(tbi); tuple path(genome), path(fai), path(dict)
+    output: tuple val(meta), path("${meta.sample}.indel.filtered.vcf.gz"), path("${meta.sample}.indel.filtered.vcf.gz.tbi"), path("${meta.sample}.indel.pass.vcf.gz"), path("${meta.sample}.indel.pass.vcf.gz.tbi")
+    script:
+    """
+    set -euo pipefail
+    gatk VariantFiltration -R ${genome} -V ${vcf} \
+        --filter-name INDEL_QD2 --filter-expression 'QD < ${params.indel_filter_qd}' \
+        --filter-name INDEL_FS200 --filter-expression 'FS > ${params.indel_filter_fs}' \
+        --filter-name INDEL_SOR10 --filter-expression 'SOR > ${params.indel_filter_sor}' \
+        --filter-name INDEL_ReadPosRankSum-20 --filter-expression 'ReadPosRankSum < ${params.indel_filter_read_pos_rank_sum}' \
+        -O ${meta.sample}.indel.filtered.vcf.gz
+    test -s ${meta.sample}.indel.filtered.vcf.gz.tbi || gatk IndexFeatureFile -I ${meta.sample}.indel.filtered.vcf.gz
+    gatk SelectVariants -R ${genome} -V ${meta.sample}.indel.filtered.vcf.gz --exclude-filtered -O ${meta.sample}.indel.pass.vcf.gz
+    test -s ${meta.sample}.indel.pass.vcf.gz.tbi || gatk IndexFeatureFile -I ${meta.sample}.indel.pass.vcf.gz
+    """
+}
+
+process MERGE_FILTERED_VARIANTS {
+    tag "${meta.sample}:merge_types"
+    cpus 1; memory '4 GB'; time '4h'; disk '80 GB'
+    container 'quay.io/biocontainers/gatk4:4.6.1.0--py310hdfd78af_0'
+    publishDir "${params.outdir}/vcf_filtered", mode:'copy', pattern:'*.filtered.vcf.gz*'
+    publishDir "${params.outdir}/vcf_pass", mode:'copy', pattern:'*.pass.vcf.gz*'
+    input:
+    tuple val(meta), path(snp_filtered), path(snp_filtered_tbi), path(snp_pass), path(snp_pass_tbi), path(indel_filtered), path(indel_filtered_tbi), path(indel_pass), path(indel_pass_tbi)
+    output:
+    tuple val(meta), path("${meta.sample}.filtered.vcf.gz"), path("${meta.sample}.filtered.vcf.gz.tbi"), emit: filtered
+    tuple val(meta), path("${meta.sample}.pass.vcf.gz"), path("${meta.sample}.pass.vcf.gz.tbi"), emit: pass
+    script:
+    """
+    set -euo pipefail
+    gatk MergeVcfs -I ${snp_filtered} -I ${indel_filtered} -O ${meta.sample}.filtered.vcf.gz
     test -s ${meta.sample}.filtered.vcf.gz.tbi || gatk IndexFeatureFile -I ${meta.sample}.filtered.vcf.gz
-    gatk --java-options "-Xms1g -Xmx${javaHeapGb}g -Djava.io.tmpdir=\${PWD}/gatk_tmp" SelectVariants -R ${genome} -V ${meta.sample}.filtered.vcf.gz --exclude-filtered -O ${meta.sample}.pass.vcf.gz
+    gatk MergeVcfs -I ${snp_pass} -I ${indel_pass} -O ${meta.sample}.pass.vcf.gz
     test -s ${meta.sample}.pass.vcf.gz.tbi || gatk IndexFeatureFile -I ${meta.sample}.pass.vcf.gz
     """
 }
@@ -616,7 +747,7 @@ process VEP_ANNOTATE {
 process VALIDATE_RNA_VARIANTS {
     tag "${meta.sample}"
     cpus 1; memory '4 GB'; time '16h'; disk '100 GB'
-    container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
+    container "${params.pysam_image}"
     publishDir "${params.outdir}/rna_validation/variants", mode:'copy'
     input:
     tuple val(meta), path(vcf), path(tbi)
@@ -629,16 +760,12 @@ process VALIDATE_RNA_VARIANTS {
     script:
     """
     set -euo pipefail
-    ${params.host_python} ${validator} variant \\
+    python3 ${validator} variant \\
         --input ${vcf} --genome ${genome} --sample ${meta.sample} \\
         --min-depth ${params.rna_variant_min_depth} \\
         --min-alt-reads ${params.rna_variant_min_alt_reads} \\
         --min-alt-fraction ${params.rna_variant_min_alt_fraction} \\
         --output-prefix ${meta.sample}.rna
-    mv ${meta.sample}.rna.validated.vcf.gz ${meta.sample}.rna.validated.tmp.vcf.gz
-    gzip -dc ${meta.sample}.rna.validated.tmp.vcf.gz | bgzip -c > ${meta.sample}.rna.validated.vcf.gz
-    tabix -f -p vcf ${meta.sample}.rna.validated.vcf.gz
-    rm ${meta.sample}.rna.validated.tmp.vcf.gz
     """
 }
 
@@ -668,7 +795,7 @@ process VALIDATE_RNA_FUSIONS {
 process VALIDATE_RNA_SPLICE_TRANSCRIPTS {
     tag "${meta.sample}"
     cpus 2; memory '8 GB'; time '24h'; disk '150 GB'
-    container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
+    container "${params.pysam_image}"
     publishDir "${params.outdir}/rna_validation/splicing", mode:'copy'
     input:
     tuple val(meta), path(novel_gtf), path(bam), path(bai)
@@ -680,7 +807,7 @@ process VALIDATE_RNA_SPLICE_TRANSCRIPTS {
     script:
     """
     set -euo pipefail
-    ${params.host_python} ${validator} splice \\
+    python3 ${validator} splice \\
         --input ${novel_gtf} --bam ${bam} --sample ${meta.sample} \\
         --min-junction-reads ${params.splice_min_junction_reads} \\
         --output-prefix ${meta.sample}.splice
@@ -689,8 +816,8 @@ process VALIDATE_RNA_SPLICE_TRANSCRIPTS {
 
 process VALIDATE_VARIANT_CODONS {
     tag "${meta.sample}:genome_read_codon_validation"
-    cpus 2; memory '4 GB'; time '8h'; disk '100 GB'
-    container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
+    cpus 2; memory '8 GB'; time '8h'; disk '100 GB'
+    container "${params.pysam_image}"
     input:
     tuple val(meta), path(vcf), path(tbi), path(bam), path(bai)
     path genome
@@ -700,7 +827,7 @@ process VALIDATE_VARIANT_CODONS {
     script:
     """
     set -euo pipefail
-    ${params.host_python} ${validation_script} \
+    python3 ${validation_script} \
         --vcf ${vcf} \
         --bam ${meta.sample}=${bam} \
         --genome ${genome} \
@@ -715,8 +842,8 @@ process VALIDATE_VARIANT_CODONS {
 
 process VALIDATE_VARIANT_READ_PROVENANCE {
     tag "${meta.sample}:variant_supporting_read_provenance"
-    cpus 2; memory '12 GB'; time '8h'; disk '100 GB'
-    container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
+    cpus 2; memory '8 GB'; time '8h'; disk '100 GB'
+    container "${params.pysam_image}"
     input:
     tuple val(meta), path(vcf), path(tbi), path(bam), path(bai)
     path samplesheet
@@ -726,7 +853,7 @@ process VALIDATE_VARIANT_READ_PROVENANCE {
     script:
     """
     set -euo pipefail
-    ${params.host_python} ${validation_script} \
+    python3 ${validation_script} \
         --vcf ${vcf} \
         --bam ${meta.sample}=${bam} \
         --samples ${samplesheet} \
@@ -798,7 +925,7 @@ process ANALYZE_CODON_MISMATCHES {
 }
 
 process PYPGATK_FASTA {
-    tag "${meta.sample}"; cpus 1; memory '2 GB'; time '8h'; disk '150 GB'
+    tag "${meta.sample}"; cpus 1; memory '8 GB'; time '8h'; disk '150 GB'
     container 'quay.io/biocontainers/pypgatk:0.0.24--pyhdfd78af_0'
     publishDir "${params.outdir}/variant_fasta", mode:'copy'
     input: tuple val(meta), path(vcf), path(tbi); path gtf; path cdna
@@ -1129,7 +1256,7 @@ process MERGE_GENE_EXPRESSION {
     script:
     """
     set -euo pipefail
-    "${params.host_python}" ${analysis_script} merge-counts \
+    python3 ${analysis_script} merge-counts \
         --counts ${count_tables} \
         --gtf ${gtf} \
         --feature-type ${params.gene_count_feature_type} \
@@ -1156,7 +1283,7 @@ process ANALYZE_EXPRESSION_SAMPLE_GO {
     script:
     """
     set -euo pipefail
-    "${params.host_python}" ${analysis_script} sample-ora \
+    python3 ${analysis_script} sample-ora \
         --matrix ${expression_matrix} \
         --sample ${meta.sample} \
         --subject ${meta.tk} \
@@ -1190,7 +1317,7 @@ process ANALYZE_EXPRESSION_RANKED_GO {
     script:
     """
     set -euo pipefail
-    "${params.host_python}" ${analysis_script} ranked-go \
+    python3 ${analysis_script} ranked-go \
         --matrix ${expression_matrix} \
         --sample ${meta.sample} \
         --baseline-sample ${baseline_sample} \
@@ -1228,7 +1355,7 @@ process MERGE_EXPRESSION_GO {
     script:
     """
     set -euo pipefail
-    "${params.host_python}" ${analysis_script} merge-expression-go \
+    python3 ${analysis_script} merge-expression-go \
         --samples ${samplesheet} \
         --ora ${ora_tables} \
         --ranked ${ranked_tables} \
@@ -1299,7 +1426,7 @@ process ANALYZE_PROGRESSION_VARIANT_SETS {
     script:
     """
     set -euo pipefail
-    "${params.host_python}" ${analysis_script} variant-sets \
+    python3 ${analysis_script} variant-sets \
         --genes ${sample_gene_tables} \
         --background ${params.go_variant_background} \
         --samples ${samplesheet} \
@@ -1328,7 +1455,7 @@ process PREPARE_GO_ANNOTATIONS {
     script:
     """
     set -euo pipefail
-    "${params.host_python}" ${preparation_script} --obo ${go_obo} --gaf ${go_gaf} --output-prefix go_annotations
+    python3 ${preparation_script} --obo ${go_obo} --gaf ${go_gaf} --output-prefix go_annotations
     """
 }
 process ANALYZE_PROGRESSION_SAMPLE {
@@ -1345,7 +1472,7 @@ process ANALYZE_PROGRESSION_SAMPLE {
     script:
     """
     set -euo pipefail
-    "${params.host_python}" ${analysis_script} --sample ${meta.sample} --subject ${meta.tk} --group ${meta.group} --progression-vcf ${progression_vcf} --background-vcf ${background_vcf} --go-mapping ${go_mapping} --go-min-size ${params.go_min_size} --go-max-size ${params.go_max_size} --fdr-threshold ${params.go_fdr_threshold} --output-prefix ${meta.sample}.progression_biology
+    python3 ${analysis_script} --sample ${meta.sample} --subject ${meta.tk} --group ${meta.group} --progression-vcf ${progression_vcf} --background-vcf ${background_vcf} --go-mapping ${go_mapping} --go-min-size ${params.go_min_size} --go-max-size ${params.go_max_size} --fdr-threshold ${params.go_fdr_threshold} --output-prefix ${meta.sample}.progression_biology
     """
 }
 process COMPARE_PROGRESSION_PAIR {
@@ -1361,7 +1488,7 @@ process COMPARE_PROGRESSION_PAIR {
     script:
     """
     set -euo pipefail
-    "${params.host_python}" ${comparison_script} --subject ${pair_meta.subject} --sample-a ${pair_meta.sample_a} --sample-b ${pair_meta.sample_b} --alleles-a ${alleles_a} --alleles-b ${alleles_b} --genes-a ${genes_a} --genes-b ${genes_b} --go-a ${go_a} --go-b ${go_b} --output-prefix ${pair_meta.pair_id}.progression_pair
+    python3 ${comparison_script} --subject ${pair_meta.subject} --sample-a ${pair_meta.sample_a} --sample-b ${pair_meta.sample_b} --alleles-a ${alleles_a} --alleles-b ${alleles_b} --genes-a ${genes_a} --genes-b ${genes_b} --go-a ${go_a} --go-b ${go_b} --output-prefix ${pair_meta.pair_id}.progression_pair
     """
 }
 process MERGE_PROGRESSION_BIOLOGY {
@@ -1388,13 +1515,13 @@ process MERGE_PROGRESSION_BIOLOGY {
     script:
     """
     set -euo pipefail
-    "${params.host_python}" ${merge_script} --sample-alleles ${sample_alleles} --sample-genes ${sample_genes} --sample-go ${sample_go} --sample-candidates ${sample_candidates} --sample-summary ${sample_summaries} --pair-alleles ${pair_alleles} --pair-genes ${pair_genes} --pair-go ${pair_go} --pair-summary ${pair_summaries} --go-metadata ${go_metadata} --output-prefix progression_biology
+    python3 ${merge_script} --sample-alleles ${sample_alleles} --sample-genes ${sample_genes} --sample-go ${sample_go} --sample-candidates ${sample_candidates} --sample-summary ${sample_summaries} --pair-alleles ${pair_alleles} --pair-genes ${pair_genes} --pair-go ${pair_go} --pair-summary ${pair_summaries} --go-metadata ${go_metadata} --output-prefix progression_biology
     """
 }
 process BUILD_IGV_EVIDENCE_BUNDLE {
     tag 'all_rna_progression_igv'
-    cpus 2; memory '8 GB'; time '24h'; disk '300 GB'
-    container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
+    cpus 2; memory '16 GB'; time '24h'; disk '300 GB'
+    container "${params.pysam_image}"
     publishDir "${params.outdir}/igv/all_evidence", mode:'copy'
     input:
     path rna_vcfs
@@ -1416,7 +1543,115 @@ process BUILD_IGV_EVIDENCE_BUNDLE {
     script:
     def bamArgs=sorted_bams.findAll { it.name.endsWith('.bam') }.collect { bam -> "--bam ${bam.baseName.tokenize('.')[0]}=${bam}" }.join(' ')
     """
-    "${params.host_python}" ${bundle_script} --genome ${genome} --rna-vcf ${rna_vcfs} --progression-vcf ${progression_vcfs} --fusion-table ${fusion_tables} --splice-table ${splice_tables} ${bamArgs} --padding ${params.read_validation_padding} --output-prefix pgtk_igv
+    python3 ${bundle_script} --genome ${genome} --rna-vcf ${rna_vcfs} --progression-vcf ${progression_vcfs} --fusion-table ${fusion_tables} --splice-table ${splice_tables} ${bamArgs} --padding ${params.read_validation_padding} --output-prefix pgtk_igv
+    """
+}
+
+process BUILD_FINDING_IGV_REVIEWS {
+    tag 'strict_finding_igv_reviews'
+    cpus 2; memory '12 GB'; time '48h'; disk '500 GB'
+    container "${params.pysam_image}"
+    publishDir "${params.outdir}/igv/findings", mode:'copy'
+    input:
+    path events
+    path event_bams
+    path genome
+    path review_script
+    output:
+    path 'finding_reviews', emit: reviews
+    script:
+    def bamFiles = event_bams.findAll { it.name ==~ /^pgtk_igv\.[^.]+\.events\.bam$/ }
+    if (!bamFiles) error 'BUILD_FINDING_IGV_REVIEWS received no event BAM files'
+    def bamArgs = bamFiles.collect { bam ->
+        def matcher = bam.name =~ /^pgtk_igv\.([^.]+)\.events\.bam$/
+        if (!matcher.matches()) error "Cannot derive sample identifier from event BAM: ${bam.name}"
+        def sample = matcher.group(1)
+        "--bam '${sample}=${bam}'"
+    }.join(' ')
+    """
+    set -euo pipefail
+    mkdir -p finding_reviews
+    python3 ${review_script} \
+        --events ${events} \
+        ${bamArgs} \
+        --genome ${genome} \
+        --output-dir finding_reviews \
+        --padding ${params.read_validation_padding} \
+        --mapq ${params.finding_review_mapq} \
+        --baseq ${params.finding_review_baseq} \
+        --reference-display-reads ${params.finding_review_reference_reads} \
+        --finding-classes '${params.finding_classes}' \
+        --primary-class-order '${params.finding_primary_class_order}' \
+        --priority-mode '${params.finding_priority_mode}' \
+        --priority-genes '${params.finding_priority_genes}' \
+        --priority-impacts '${params.finding_priority_impacts}' \
+        --priority-consequences '${params.finding_priority_consequences}'
+    test -s finding_reviews/findings_manifest.tsv
+    finding_count=\$(awk 'END { print NR - 1 }' finding_reviews/findings_manifest.tsv)
+    if [[ "\$finding_count" -le 0 ]]; then
+        echo 'ERROR: strict finding review produced zero findings' >&2
+        echo 'Event classes:' >&2
+        awk -F '\t' 'NR > 1 { count[\$3]++ } END { for (class in count) print class, count[class] }' ${events} >&2
+        echo 'Configured BAM mappings:' >&2
+        printf '%s\n' ${bamArgs} >&2
+        exit 1
+    fi
+    printf 'Generated %s strict finding reviews\n' "\$finding_count"
+    """
+}
+
+process GENERATE_PRIORITY_IGV_REPORTS {
+    tag 'priority_igv_reports'
+    cpus 2; memory '16 GB'; time '48h'; disk '150 GB'
+    container "${params.container_cache}/quay.io-biocontainers-igv-reports-1.16.0--pyh7e72e81_0.img"
+    publishDir "${params.outdir}/igv/findings/reports", mode:'copy'
+    input:
+    path finding_reviews
+    path genome
+    output:
+    path 'igv_reports', emit: reports
+    script:
+    """
+    set -euo pipefail
+    export HOME="\$PWD/igv_reports_home"
+    export XDG_CACHE_HOME="\$PWD/igv_reports_cache"
+    export TMPDIR="\$PWD/igv_reports_tmp"
+    mkdir -p igv_reports "\$HOME" "\$XDG_CACHE_HOME" "\$TMPDIR"
+    report_command=\$(command -v create_report || command -v create_reports)
+    [[ -x "\$report_command" ]] || { echo 'ERROR: IGV Reports command not found' >&2; exit 1; }
+    if [[ ${params.igv_report_limit} -eq 0 ]]; then
+        mapfile -t batches < ${finding_reviews}/priority_batches.txt
+    else
+        mapfile -t batches < <(head -n ${params.igv_report_limit} ${finding_reviews}/priority_batches.txt)
+    fi
+    (( \${#batches[@]} > 0 )) || { echo 'ERROR: no prioritized findings were selected' >&2; exit 1; }
+    printf 'EventID\tReport\n' > igv_reports/report_manifest.tsv
+    generated=0
+    for source_batch in "\${batches[@]}"; do
+        finding=\$(basename "\$source_batch" .review.igv.batch.txt)
+        finding_dir=${finding_reviews}/\$finding
+        bed=\$finding_dir/\$finding.support_labels.bed
+        alt_bam=\$finding_dir/\$finding.exact_alt.unique.bam
+        alt_bai=\$alt_bam.bai
+        ref_bam=\$finding_dir/\$finding.reference.display.bam
+        ref_bai=\$ref_bam.bai
+        for required in "\$bed" "\$alt_bam" "\$alt_bai" "\$ref_bam" "\$ref_bai"; do
+            [[ -s "\$required" ]] || { echo "ERROR: missing report input: \$required" >&2; exit 1; }
+        done
+        output=\$PWD/igv_reports/\$finding.html
+        timeout ${params.igv_report_timeout_seconds} "\$report_command" "\$bed" \
+            --fasta ${genome} \
+            --tracks "\$bed" "\$alt_bam" "\$ref_bam" \
+            --flanking ${params.read_validation_padding} \
+            --title "${params.igv_report_title_prefix}: \$finding" \
+            --output "\$output"
+        [[ -s "\$output" ]] || { echo "ERROR: report was not created: \$output" >&2; exit 1; }
+        grep -qi '<html' "\$output"
+        printf '%s\t%s\n' "\$finding" "\$finding.html" >> igv_reports/report_manifest.tsv
+        generated=\$((generated + 1))
+    done
+    printf 'Generated %s self-contained offline IGV reports\n' "\$generated" > igv_reports/report_summary.txt
+    test "\$generated" -eq "\${#batches[@]}"
     """
 }
 
@@ -1744,7 +1979,7 @@ process VALIDATE_MAXQUANT_SPLICE_JUNCTIONS {
     script:
     """
     set -euo pipefail
-    ${params.host_python} ${validation_script} \\
+    python3 ${validation_script} \\
         --candidates ${candidates} \\
         --splice-fasta ${splice_fastas} \\
         --transcript-gtf ${transcript_gtfs} \\
@@ -1849,7 +2084,7 @@ process BUILD_INTEGRATED_VARIANT_EVIDENCE {
 process VALIDATE_PROTEOGENOMIC_READS {
     tag 'proteogenomic_read_validation'
     cpus 1; memory '32 GB'; time '48h'; disk '600 GB'
-    container 'quay.io/biocontainers/samtools:1.21--h96c455f_1'
+    container "${params.pysam_image}"
     publishDir "${params.outdir}/proteogenomics_validation/read_validation", mode:'copy'
     input:
     path variants
@@ -1876,7 +2111,7 @@ process VALIDATE_PROTEOGENOMIC_READS {
     def bamArgs = sorted_bams.findAll { file -> file.name.endsWith('.bam') }.collect { bam -> "--bam ${bam.baseName.tokenize('.')[0]}=${bam}" }.join(' ')
     """
     set -euo pipefail
-    ${params.host_python} ${validation_script} \
+    python3 ${validation_script} \
         --variants ${variants} \
         --junctions ${junctions} \
         --splice-detail ${splice_detail} \
@@ -2002,11 +2237,18 @@ process MULTIQC_FINAL {
 }
 
 workflow {
-    if (!params.host_python) error '--host_python is required'
     if (!params.sra_dir) error '--sra_dir is required'
     if (!params.reference_downloads) error '--reference_downloads is required'
     if (!params.container_cache) error '--container_cache is required'
+    if (!params.pysam_image) error '--pysam_image is required'
     if (!params.ensembl_pep) error '--ensembl_pep is required'
+    if (!(params.finding_priority_mode in ['all','filter'])) error '--finding_priority_mode must be all or filter'
+    if ((params.igv_report_limit as int) < 0) error '--igv_report_limit must be zero or a positive integer'
+    if ((params.igv_report_timeout_seconds as int) <= 0) error '--igv_report_timeout_seconds must be a positive integer'
+    if ((params.finding_review_mapq as int) < 0) error '--finding_review_mapq must be non-negative'
+    if ((params.finding_review_baseq as int) < 0) error '--finding_review_baseq must be non-negative'
+    if ((params.finding_review_reference_reads as int) < 0) error '--finding_review_reference_reads must be non-negative'
+    if ((params.read_validation_padding as int) < 0) error '--read_validation_padding must be non-negative'
     samples = channel.fromPath(params.samplesheet, checkIfExists:true).splitCsv(header:true).map { row ->
         if (!row.sample || !row.srr) error 'samples.csv requires sample and srr; TK, Group and baseline are optional'
         def sample = row.sample.trim()
@@ -2070,12 +2312,21 @@ workflow {
     shard_validator=file("${projectDir}/validate_haplotype_shards.py", checkIfExists:true)
     validated_hc_shards=VALIDATE_HAPLOTYPE_SHARDS(hc_grouped,shard_validator)
     gvcf=GATHER_HAPLOTYPE_GVCF(validated_hc_shards)
-    genotype_result=GENOTYPE_FILTER(gvcf,ref)
+    raw_variants=GENOTYPE_VARIANTS(gvcf,ref)
+    normalized_variants=NORMALIZE_VARIANTS(raw_variants,ref)
+    selected_snps=SELECT_SNPS(normalized_variants,ref)
+    selected_indels=SELECT_INDELS(normalized_variants,ref)
+    snp_filtered=FILTER_SNPS(selected_snps,ref)
+    indel_filtered=FILTER_INDELS(selected_indels,ref)
+    separated_filter_inputs=snp_filtered.map { m,sf,sfi,sp,spi -> tuple(m.sample,m,sf,sfi,sp,spi) }
+        .join(indel_filtered.map { m,inf,infi,inp,inpi -> tuple(m.sample,inf,infi,inp,inpi) })
+        .map { sample,m,sf,sfi,sp,spi,inf,infi,inp,inpi -> tuple(m,sf,sfi,sp,spi,inf,infi,inp,inpi) }
+    genotype_result=MERGE_FILTERED_VARIANTS(separated_filter_inputs)
     pass=genotype_result.pass
     variant_stats=BCFTOOLS_STATS(pass)
     annotated=VEP_ANNOTATE(pass,ref,refs.vep_cache)
     validated_variants=VALIDATE_RNA_VARIANTS(annotated,refs.genome,rna_validator)
-    stage_qc_inputs=genotype_result.raw.map { m,v,tbi -> tuple(m.sample,m,v,tbi) }
+    stage_qc_inputs=raw_variants.map { m,v,tbi -> tuple(m.sample,m,v,tbi) }
         .join(genotype_result.pass.map { m,v,tbi -> tuple(m.sample,v,tbi) })
         .join(validated_variants.validated.map { m,v,tbi -> tuple(m.sample,v,tbi) })
         .map { sample,m,raw,raw_tbi,pass_vcf,pass_tbi,rna,rna_tbi -> tuple(m,raw,raw_tbi,pass_vcf,pass_tbi,rna,rna_tbi) }
@@ -2085,7 +2336,7 @@ workflow {
     if (params.run_external_vcf_comparison) {
         if (!params.external_vcf_dir) error '--external_vcf_dir is required when --run_external_vcf_comparison true'
         comparison_script=file("${projectDir}/compare_external_vcf.py", checkIfExists:true)
-        external_raw_inputs=genotype_result.raw.map { m,v,tbi ->
+        external_raw_inputs=raw_variants.map { m,v,tbi ->
             def comparisonMeta = m + [comparison_stage:'raw']
             tuple(comparisonMeta,v,tbi,resolveExternalVcf(params.external_vcf_dir.toString(),m.srr,params.external_vcf_suffix.toString()))
         }
@@ -2215,10 +2466,20 @@ workflow {
         refs.genome,
         igv_bundle_script
     )
+    finding_review_script=file("${projectDir}/build_finding_igv_reviews.py",checkIfExists:true)
+    finding_reviews=BUILD_FINDING_IGV_REVIEWS(
+        igv_bundle.events,
+        igv_bundle.bams.collect(),
+        refs.genome,
+        finding_review_script
+    )
+    if (params.generate_priority_igv_reports) {
+        priority_igv_reports=GENERATE_PRIORITY_IGV_REPORTS(finding_reviews.reviews, refs.genome)
+    }
     comparative_report_script=file("${projectDir}/build_comparative_advantage_report.py", checkIfExists:true)
     comparative_report=BUILD_COMPARATIVE_ADVANTAGE_REPORT(
         file(params.samplesheet,checkIfExists:true),
-        genotype_result.raw.map { m,v,t -> v }.collect(),
+        raw_variants.map { m,v,t -> v }.collect(),
         genotype_result.pass.map { m,v,t -> v }.collect(),
         validated_variants.validated.map { m,v,t -> v }.collect(),
         prog.map { m,nv,nt,bv,bt,sv,st,su -> nv }.collect(),

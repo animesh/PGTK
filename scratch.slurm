@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=8G
-#SBATCH --output=/cluster/projects/nn9036k/scrbkup/pgtk/pgtk-wrapper-%j.log
+#SBATCH --output=pgtk-wrapper-%j.log
 set -uo pipefail
 
 usage() {
@@ -23,6 +23,7 @@ Optional wrapper overrides (Saga defaults are built in):
   --tmp-root PATH
   --nxf-home PATH
   --container-cache PATH
+  --pysam-image PATH
   --sra-dir PATH
   --reference-downloads PATH
   --samplesheet PATH
@@ -48,20 +49,21 @@ EOF
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
 need_value() { [[ $# -ge 2 && -n "$2" ]] || die "$1 requires a value"; }
 
-PROJECT_DIR=/cluster/projects/nn9036k/scrbkup/pgtk
+PROJECT_DIR=${SLURM_SUBMIT_DIR:-$(pwd -P)}
 NEXTFLOW=/cluster/home/ash022/bin/nextflow
 HOST_PYTHON=/cluster/software/Mamba/4.14.0-0/bin/python
 APPTAINER=$(command -v apptainer || true)
 JAVA_MODULE=Java/21
 WORK_DIR=/cluster/work/users/ash022/work
 TMP_ROOT=/cluster/work/users/ash022/tmp
-NXF_HOME_DIR=/cluster/projects/nn9036k/scrbkup/pgtk/.nextflow_home
-CONTAINER_CACHE=/cluster/projects/nn9036k/scrbkup/pgtk/singularity_cache
-SRA_DIR=/cluster/projects/nn9036k/scrbkup/pgtk/sra_cache
-REFERENCE_DOWNLOADS=/cluster/projects/nn9036k/scrbkup/pgtk/reference_downloads
-SAMPLESHEET=/cluster/projects/nn9036k/scrbkup/pgtk/samples.csv
-RESULTS_DIR=/cluster/projects/nn9036k/scrbkup/pgtk/results
-ENSEMBL_PEP=/cluster/projects/nn9036k/scrbkup/pgtk/reference_downloads/Homo_sapiens.GRCh38.pep.all.fa.gz
+NXF_HOME_DIR="$PROJECT_DIR/.nextflow_home"
+CONTAINER_CACHE="$PROJECT_DIR/singularity_cache"
+PYSAM_IMAGE=
+SRA_DIR="$PROJECT_DIR/sra_cache"
+REFERENCE_DOWNLOADS="$PROJECT_DIR/reference_downloads"
+SAMPLESHEET="$PROJECT_DIR/samples.csv"
+RESULTS_DIR="$PROJECT_DIR/results"
+ENSEMBL_PEP="$REFERENCE_DOWNLOADS/Homo_sapiens.GRCh38.pep.all.fa.gz"
 PROFILE=robust
 ACCOUNT=nn9036k
 NORMAL_PARTITION=normal
@@ -73,7 +75,7 @@ MAX_MEMORY_GB=512
 QUEUE_SIZE=200
 SUBMIT_RATE_LIMIT=60/1min
 NXF_OPTS_VALUE='-Xms1g -Xmx6g'
-SLURM_LOG_TEMPLATE=/cluster/projects/nn9036k/scrbkup/pgtk/pgtk-wrapper-{job_id}.log
+SLURM_LOG_TEMPLATE="$PROJECT_DIR/pgtk-wrapper-{job_id}.log"
 PIPELINE_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -87,6 +89,7 @@ while [[ $# -gt 0 ]]; do
         --tmp-root) need_value "$@"; TMP_ROOT=$2; shift 2 ;;
         --nxf-home) need_value "$@"; NXF_HOME_DIR=$2; shift 2 ;;
         --container-cache) need_value "$@"; CONTAINER_CACHE=$2; shift 2 ;;
+        --pysam-image) need_value "$@"; PYSAM_IMAGE=$2; shift 2 ;;
         --sra-dir) need_value "$@"; SRA_DIR=$2; shift 2 ;;
         --reference-downloads) need_value "$@"; REFERENCE_DOWNLOADS=$2; shift 2 ;;
         --samplesheet) need_value "$@"; SAMPLESHEET=$2; shift 2 ;;
@@ -109,6 +112,8 @@ while [[ $# -gt 0 ]]; do
         *) die "unknown wrapper option before --: $1" ;;
     esac
 done
+
+[[ -n $PYSAM_IMAGE ]] || PYSAM_IMAGE="$CONTAINER_CACHE/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img"
 
 for variable in PROJECT_DIR NEXTFLOW HOST_PYTHON APPTAINER JAVA_MODULE WORK_DIR TMP_ROOT NXF_HOME_DIR CONTAINER_CACHE SRA_DIR REFERENCE_DOWNLOADS SAMPLESHEET RESULTS_DIR ENSEMBL_PEP PROFILE ACCOUNT NORMAL_PARTITION BIGMEM_PARTITION NORMAL_CPU_THRESHOLD NORMAL_MEMORY_THRESHOLD_GB MAX_CPUS MAX_MEMORY_GB QUEUE_SIZE SUBMIT_RATE_LIMIT NXF_OPTS_VALUE SLURM_LOG_TEMPLATE; do
     [[ -n ${!variable} ]] || die "missing required wrapper option for $variable"
@@ -142,8 +147,13 @@ finalize() {
 }
 trap finalize EXIT
 
-for executable in "$NEXTFLOW" "$HOST_PYTHON" "$APPTAINER"; do [[ -x $executable ]] || die "not executable: $executable"; done
-for file in "$PROJECT_DIR/main.nf" "$PROJECT_DIR/nextflow.config" "$SAMPLESHEET" "$PROJECT_DIR/collect_pipeline_failures.py" "$PROJECT_DIR/analyze_pipeline_trace.py" "$ENSEMBL_PEP"; do [[ -s $file ]] || die "missing or empty file: $file"; done
+for executable in "$NEXTFLOW" "$HOST_PYTHON" "$APPTAINER"; do
+    [[ -x $executable ]] || die "not executable: $executable"
+done
+[[ "$HOST_PYTHON" == /cluster/software/Mamba/4.14.0-0/bin/python || -n ${PGTK_ALLOW_PYTHON_OVERRIDE:-} ]] || \
+    die "unexpected Saga Python: $HOST_PYTHON; expected /cluster/software/Mamba/4.14.0-0/bin/python"
+"$HOST_PYTHON" --version || die "cannot execute Saga Python: $HOST_PYTHON"
+for file in "$PROJECT_DIR/main.nf" "$PYSAM_IMAGE" "$PROJECT_DIR/nextflow.config" "$SAMPLESHEET" "$PROJECT_DIR/collect_pipeline_failures.py" "$PROJECT_DIR/analyze_pipeline_trace.py" "$ENSEMBL_PEP"; do [[ -s $file ]] || die "missing or empty file: $file"; done
 for directory in "$SRA_DIR" "$REFERENCE_DOWNLOADS"; do [[ -d $directory && -r $directory ]] || die "input directory is missing or unreadable: $directory"; done
 for directory in "$WORK_DIR" "$TMP_ROOT" "$NXF_HOME_DIR" "$CONTAINER_CACHE" "$RESULTS_DIR"; do mkdir -p "$directory" || die "cannot create directory: $directory"; [[ -d $directory && -w $directory ]] || die "directory is not writable: $directory"; done
 
@@ -165,10 +175,6 @@ export PGTK_MAX_MEMORY_GB="$MAX_MEMORY_GB"
 export PGTK_QUEUE_SIZE="$QUEUE_SIZE"
 export PGTK_SUBMIT_RATE_LIMIT="$SUBMIT_RATE_LIMIT"
 mkdir -p "$TMPDIR" "$APPTAINER_TMPDIR" "$RESULTS_DIR/failure_logs" || die 'cannot create runtime directories'
-HOST_PYTHON_REAL=$(readlink -f "$HOST_PYTHON") || die "cannot resolve host Python: $HOST_PYTHON"
-HOST_PYTHON_ROOT=$(dirname "$(dirname "$HOST_PYTHON_REAL")")
-RUNTIME_BINDS="$PROJECT_DIR,$REFERENCE_DOWNLOADS,$SRA_DIR,$CONTAINER_CACHE,$WORK_DIR,$TMP_ROOT,$HOST_PYTHON_ROOT"
-export APPTAINER_BINDPATH="${APPTAINER_BINDPATH:+$APPTAINER_BINDPATH,}$RUNTIME_BINDS"
 "$HOST_PYTHON" "$PROJECT_DIR/validate_runtime_inputs.py" \
     --project-dir "$PROJECT_DIR" \
     --reference-downloads "$REFERENCE_DOWNLOADS" \
@@ -180,7 +186,8 @@ export APPTAINER_BINDPATH="${APPTAINER_BINDPATH:+$APPTAINER_BINDPATH,}$RUNTIME_B
     --tmp-root "$TMP_ROOT" \
     --results-dir "$RESULTS_DIR" \
     --host-python "$HOST_PYTHON" \
-    --apptainer "$APPTAINER" || die 'runtime input validation failed'
+    --apptainer "$APPTAINER" \
+    --pysam-image "$PYSAM_IMAGE" || die 'runtime input validation failed'
 
 printf 'Job: %s\nProject: %s\nWork: %s\nTemporary: %s\nProfile: %s\nNormal partition: %s\nBigmem partition: %s\nThresholds: CPU>%s or memory>%sGB\nCaps: CPU=%s memory=%sGB\n' \
     "$JOB_ID" "$PROJECT_DIR" "$WORK_DIR" "$RUN_TMP" "$PROFILE" "$NORMAL_PARTITION" "$BIGMEM_PARTITION" "$NORMAL_CPU_THRESHOLD" "$NORMAL_MEMORY_THRESHOLD_GB" "$MAX_CPUS" "$MAX_MEMORY_GB"
@@ -200,6 +207,8 @@ printf 'Job: %s\nProject: %s\nWork: %s\nTemporary: %s\nProfile: %s\nNormal parti
     --sra_dir "$SRA_DIR" \
     --reference_downloads "$REFERENCE_DOWNLOADS" \
     --container_cache "$CONTAINER_CACHE" \
+    --pysam_image "$PYSAM_IMAGE" \
     --ensembl_pep "$ENSEMBL_PEP" \
-    --host_python "$HOST_PYTHON" \
+    --go_obo "$REFERENCE_DOWNLOADS/go-basic.obo" \
+    --go_gaf "$REFERENCE_DOWNLOADS/goa_human.gaf.gz" \
     "${PIPELINE_ARGS[@]}"

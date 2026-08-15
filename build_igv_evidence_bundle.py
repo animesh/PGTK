@@ -2,7 +2,10 @@
 import argparse
 import csv
 import gzip
-import subprocess
+try:
+    import pysam
+except ImportError:
+    pysam = None
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -15,12 +18,24 @@ def sample_from(path):
     return Path(path).name.split('.')[0]
 
 
-def add_event(events, event_id, sample, event_class, chrom, start0, end, label, source, chrom2='', start2='', end2=''):
+
+def choose_annotation(annotations, alt, ref):
+    alt=(alt or '').upper(); ref=(ref or '').upper(); alleles={alt}
+    if ref and alt.startswith(ref): alleles.add(alt[len(ref):] or '-')
+    if ref and len(ref)>len(alt) and ref.startswith(alt): alleles.add('-')
+    matched=[row for row in annotations if (row.get('Allele') or '').upper() in alleles]
+    pool=matched or list(annotations)
+    if not pool:return {}
+    return min(pool,key=lambda row:(row.get('PICK')!='1',row.get('CANONICAL')!='YES',not bool(row.get('HGVSp') or row.get('Amino_acids'))))
+
+def add_event(events, event_id, sample, event_class, chrom, start0, end, label, source, chrom2='', start2='', end2='', gene='', consequence='', impact='', transcript='', protein_change=''):
     events.append({
         'Event': event_id, 'Sample': sample, 'Class': event_class,
         'Chrom': chrom, 'Start0': start0, 'End': end,
         'Chrom2': chrom2, 'Start2_0': start2, 'End2': end2,
         'Label': label, 'Source': Path(source).name,
+        'Gene': gene, 'Consequence': consequence, 'Impact': impact,
+        'Transcript': transcript, 'ProteinChange': protein_change,
     })
 
 
@@ -37,23 +52,37 @@ def main():
     args = parser.parse_args()
 
     bams = dict(value.split('=', 1) for value in args.bam)
+    if bams and pysam is None: raise RuntimeError('pysam is required when BAM inputs are supplied')
     events = []
     event_number = 0
 
     for event_class, paths in [('rna_variant', args.rna_vcf), ('progression_variant', args.progression_vcf)]:
         for path in paths:
             sample = sample_from(path)
+            csq_fields = []
             with open_text(path) as handle:
                 for line in handle:
+                    if line.startswith('##INFO=<ID=CSQ'):
+                        marker = 'Format: '
+                        if marker in line:
+                            csq_fields = line.split(marker, 1)[1].split('\">', 1)[0].rstrip('\n\r"').split('|')
+                        continue
                     if line.startswith('#'):
                         continue
                     fields = line.rstrip().split('\t')
-                    if len(fields) < 5:
+                    if len(fields) < 8:
                         continue
+                    info = dict(item.split('=',1) if '=' in item else (item,'') for item in fields[7].split(';'))
+                    annotations = [dict(zip(csq_fields, value.split('|'))) for value in info.get('CSQ','').split(',') if value] if csq_fields else []
+                    canonical = choose_annotation(annotations, fields[4].split(',')[0], fields[3])
                     event_number += 1
                     start0 = max(0, int(fields[1]) - 1)
                     add_event(events, f'E{event_number:08d}', sample, event_class, fields[0], start0,
-                              start0 + max(1, len(fields[3])), f'{fields[3]}>{fields[4]}', path)
+                              start0 + max(1, len(fields[3])), f'{fields[3]}>{fields[4]}', path,
+                              gene=canonical.get('SYMBOL') or canonical.get('Gene') or '',
+                              consequence=canonical.get('Consequence',''), impact=canonical.get('IMPACT',''),
+                              transcript=canonical.get('Feature',''),
+                              protein_change=canonical.get('HGVSp') or canonical.get('Amino_acids') or '')
 
     for path in args.fusion_table:
         sample = sample_from(path)
@@ -87,7 +116,7 @@ def main():
                     add_event(events, f'E{event_number:08d}', sample, 'splice_junction', chrom,
                               max(0, int(start) - 1), int(end), transcript, path)
 
-    fields = ['Event', 'Sample', 'Class', 'Chrom', 'Start0', 'End', 'Chrom2', 'Start2_0', 'End2', 'Label', 'Source']
+    fields = ['Event', 'Sample', 'Class', 'Chrom', 'Start0', 'End', 'Chrom2', 'Start2_0', 'End2', 'Label', 'Source', 'Gene', 'Consequence', 'Impact', 'Transcript', 'ProteinChange']
     with open(args.output_prefix + '.events.tsv', 'w', encoding='utf-8', newline='') as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, delimiter='\t', lineterminator='\n')
         writer.writeheader()
@@ -127,11 +156,22 @@ def main():
         with open(region_bed, 'w', encoding='utf-8') as handle:
             for chrom, start, end in merged:
                 handle.write(f'{chrom}\t{start}\t{end}\n')
-        if merged:
-            subprocess.run(['samtools', 'view', '-bh', '-L', region_bed, '-o', output_bam, bam], check=True)
-        else:
-            subprocess.run(['samtools', 'view', '-H', '-b', '-o', output_bam, bam], check=True)
-        subprocess.run(['samtools', 'index', output_bam], check=True)
+        temporary_bam=output_bam+'.unsorted.bam'
+        try:
+            with pysam.AlignmentFile(bam,'rb') as source:
+                available=set(source.references)
+                with pysam.AlignmentFile(temporary_bam,'wb',template=source) as output:
+                    seen=set()
+                    for chrom,start,end in merged:
+                        plain=chrom[3:] if chrom.startswith('chr') else chrom
+                        resolved=next((name for name in (chrom,plain,'chr'+plain) if name in available),None)
+                        if resolved is None:continue
+                        for read in source.fetch(resolved,start,end):
+                            marker=(read.query_name,read.flag,read.reference_id,read.reference_start,read.cigarstring)
+                            if marker not in seen:output.write(read);seen.add(marker)
+            pysam.sort('-o',output_bam,temporary_bam);pysam.index(output_bam)
+            if pysam.quickcheck(output_bam)!='':raise RuntimeError(f'HTSlib quickcheck failed: {output_bam}')
+        finally:Path(temporary_bam).unlink(missing_ok=True)
         manifest.append([sample, bam, output_bam, output_bam + '.bai', len(merged)])
 
     with open(args.output_prefix + '.sample_manifest.tsv', 'w', encoding='utf-8', newline='') as handle:

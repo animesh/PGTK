@@ -356,6 +356,17 @@ pull_image \
     'pvactools-7.1.1.img' \
     'docker://griffithlab/pvactools:7.1.1'
 
+
+pull_image \
+    'quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img' \
+    'docker://quay.io/biocontainers/pysam:0.24.0--py312hf5ad864_1'
+validate_image_command "$CONTAINER_DIR/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img" python3 -c 'import pysam; assert pysam.__version__ == "0.24.0"; assert pysam.__samtools_version__ == "1.23.1"'
+
+pull_image \
+    'quay.io-biocontainers-igv-reports-1.16.0--pyh7e72e81_0.img' \
+    'docker://quay.io/biocontainers/igv-reports:1.16.0--pyh7e72e81_0'
+validate_image_command "$CONTAINER_DIR/quay.io-biocontainers-igv-reports-1.16.0--pyh7e72e81_0.img" sh -c 'command -v create_report || command -v create_reports'
+
 download_asset \
     'https://ftp.ensembl.org/pub/release-111/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz' \
     "$REFERENCE_DIR/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz" \
@@ -439,6 +450,6 @@ find "$CONTAINER_DIR" -maxdepth 1 -type f -name '*.img' -print0 \
     | xargs -0 sha256sum \
     > "$CONTAINER_DIR/downloaded_containers.sha256"
 
-printf 'All 16 containers and all 9 reference assets are valid.\n'
+printf 'All 17 containers and all 9 reference assets are valid.\n'
 printf 'Reference checksums: %s\n' "$REFERENCE_DIR/downloaded_assets.sha256"
 printf 'Container checksums: %s\n' "$CONTAINER_DIR/downloaded_containers.sha256"

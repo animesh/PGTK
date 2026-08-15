@@ -1,4 +1,4 @@
-import argparse, csv, gzip, re, subprocess, sys
+import argparse, csv, gzip, re, sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -50,9 +50,13 @@ def explain(reasons, passed):
     return '; '.join(FAILURE_TEXT.get(code, code) for code in reasons)
 
 def ref_base(genome, chrom, pos, length):
-    region=f'{chrom}:{pos}-{pos+length-1}'
-    result=subprocess.run(['samtools','faidx',genome,region],check=True,text=True,capture_output=True)
-    return ''.join(x.strip() for x in result.stdout.splitlines() if not x.startswith('>')).upper()
+    import pysam
+    with pysam.FastaFile(genome) as fasta:
+        names=set(fasta.references)
+        plain=chrom[3:] if chrom.startswith('chr') else chrom
+        resolved=next((x for x in (chrom,plain,'chr'+plain) if x in names),None)
+        if resolved is None: raise ValueError(f'contig not found: {chrom}')
+        return fasta.fetch(resolved,pos-1,pos-1+length).upper()
 
 def variant_mode(a):
     headers=[]; rows=[]; accepted=[]; rejected=[]; csq_fields=[]
@@ -89,9 +93,16 @@ def variant_mode(a):
             row={'Sample':a.sample,'Event type':'variant','Event':f'{chrom}:{pos}:{ref}>{alt}','Initial finding':f'VEP protein-altering candidate {chrom}:{pos}:{ref}>{alt}','Validation rule':'PASS; GRCh38 REF match; supported protein consequence; depth/ALT-read/ALT-fraction thresholds','Observed evidence':f'FILTER={flt};DP={dp};ALT_READS={alt_depth};ALT_FRACTION={af:.6g};CONSEQUENCES={";".join(sorted(set(consequences)))}','Status':status,'Failure codes':';'.join(reasons),'Failure explanation':explain(reasons,'Passed all RNA variant validation rules'),'Required resolution':'none' if not reasons else 'Review the listed failed checks; rejected events are excluded from translation','Depth':dp,'ALT reads':alt_depth,'ALT fraction':f'{af:.6g}','Consequences':';'.join(sorted(set(consequences))),'Source':Path(a.input).name}
             rows.append(row)
             (accepted if status=='RNA_VALIDATED' else rejected).append(line)
+    import pysam
     out=Path(a.output_prefix)
-    with gzip.open(f'{out}.validated.vcf.gz','wt',encoding='utf-8') as h:h.writelines(headers+accepted)
-    with gzip.open(f'{out}.rejected.vcf.gz','wt',encoding='utf-8') as h:h.writelines(headers+rejected)
+    validated_plain=Path(f'{out}.validated.vcf')
+    rejected_plain=Path(f'{out}.rejected.vcf')
+    validated_plain.write_text(''.join(headers+accepted),encoding='utf-8')
+    rejected_plain.write_text(''.join(headers+rejected),encoding='utf-8')
+    pysam.tabix_compress(str(validated_plain),f'{out}.validated.vcf.gz',force=True)
+    pysam.tabix_index(f'{out}.validated.vcf.gz',preset='vcf',force=True)
+    pysam.tabix_compress(str(rejected_plain),f'{out}.rejected.vcf.gz',force=True)
+    validated_plain.unlink(); rejected_plain.unlink()
     fields=['Sample','Event type','Event','Initial finding','Validation rule','Observed evidence','Status','Failure codes','Failure explanation','Required resolution','Depth','ALT reads','ALT fraction','Consequences','Source']
     write_tsv(f'{out}.audit.tsv',rows,fields);write_tsv(f'{out}.validated.tsv',[x for x in rows if x['Status']=='RNA_VALIDATED'],fields);write_tsv(f'{out}.rejected.tsv',[x for x in rows if x['Status']=='REJECTED'],fields)
 
@@ -132,13 +143,13 @@ def transcript_models(path):
     return models,lines,comments
 
 def splice_mode(a):
+    import pysam
     counts=Counter()
-    proc=subprocess.Popen(['samtools','view','-F','2308',a.bam],stdout=subprocess.PIPE,text=True)
-    for line in proc.stdout:
-        f=line.split('\t')
-        if len(f)>5 and 'N' in f[5]:
-            for start,end in cigar_junctions(int(f[3]),f[5]):counts[(f[2],start,end)]+=1
-    if proc.wait()!=0:raise RuntimeError('samtools view failed')
+    with pysam.AlignmentFile(a.bam,'rb') as bam:
+        for read in bam.fetch(until_eof=True):
+            if read.is_unmapped or read.is_secondary or read.is_supplementary or read.is_duplicate or not read.cigarstring or 'N' not in read.cigarstring: continue
+            chrom=bam.get_reference_name(read.reference_id)
+            for start,end in cigar_junctions(read.reference_start+1,read.cigarstring): counts[(chrom,start,end)]+=1
     models,lines,comments=transcript_models(a.input);audit=[];valid_lines=[];reject_lines=[]
     for tx,exons in models.items():
         exons=sorted(exons,key=lambda x:x[1]);junctions=[]

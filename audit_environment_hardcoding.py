@@ -50,6 +50,7 @@ def main():
         root / "compare_external_vcf.py",
         root / "build_comparative_advantage_report.py",
         root / "build_igv_evidence_bundle.py",
+        root / "build_finding_igv_reviews.py",
     ]
     for path in active_files:
         if not path.is_file() or path.name in SKIP_NAMES or path.suffix not in TEXT_SUFFIXES:

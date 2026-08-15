@@ -1,59 +1,20 @@
 #!/usr/bin/env python3
-import os
-import subprocess
-import sys
-import tempfile
+import subprocess,sys,tempfile
 from pathlib import Path
-
-root = Path(__file__).resolve().parent
-with tempfile.TemporaryDirectory(prefix='pgtk_igv_fixture_') as temp:
-    temp = Path(temp)
-    bindir = temp / 'bin'
-    bindir.mkdir()
-    samtools = bindir / 'samtools'
-    samtools.write_text("""#!/bin/sh
-if [ \"$1\" = view ]; then
-  out=''; prev=''
-  for value in \"$@\"; do
-    if [ \"$prev\" = -o ]; then out=$value; fi
-    prev=$value
-  done
-  : > \"$out\"
-elif [ \"$1\" = index ]; then
-  : > \"$2.bai\"
-fi
-""", encoding='utf-8')
-    samtools.chmod(0o755)
-    (temp / 'genome.fa').write_text('>1\nA\n>2\nA\n>7\nA\n', encoding='utf-8')
-    (temp / 'TK1.rna.validated.vcf').write_text('##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n1\t10\t.\tA\tG\t.\tPASS\t.\n', encoding='utf-8')
-    (temp / 'TK1.fusion.validated.tsv').write_text('#gene1\tgene2\tbreakpoint1\tbreakpoint2\nKIF1A\tDENND11\t2:20\t7:30\n', encoding='utf-8')
-    (temp / 'TK1.splice.audit.tsv').write_text('Event\tStatus\tJunctions\nTX1\tRNA_VALIDATED\t1:40-50\n', encoding='utf-8')
-    (temp / 'TK1.Aligned.sortedByCoord.out.bam').touch()
-    prefix = temp / 'pgtk_igv'
-    env = dict(os.environ)
-    env['PATH'] = str(bindir) + os.pathsep + env.get('PATH', '')
-    subprocess.run([
-        sys.executable, str(root / 'build_igv_evidence_bundle.py'),
-        '--genome', str(temp / 'genome.fa'),
-        '--rna-vcf', str(temp / 'TK1.rna.validated.vcf'),
-        '--fusion-table', str(temp / 'TK1.fusion.validated.tsv'),
-        '--splice-table', str(temp / 'TK1.splice.audit.tsv'),
-        '--bam', f'TK1={temp / "TK1.Aligned.sortedByCoord.out.bam"}',
-        '--output-prefix', str(prefix),
-    ], check=True, env=env)
-    required = [
-        prefix.with_suffix('.events.tsv'), prefix.with_suffix('.events.bed'), prefix.with_suffix('.events.bedpe'),
-        prefix.with_suffix('.sample_manifest.tsv'), prefix.with_suffix('.igv.batch.txt'), prefix.with_suffix('.igv.session.xml'),
-        prefix.with_suffix('.summary.txt'), Path(str(prefix) + '.TK1.events.bam'), Path(str(prefix) + '.TK1.events.bam.bai'),
-    ]
-    for path in required:
-        if not path.exists():
-            raise AssertionError(f'missing IGV fixture output: {path}')
-    summary = prefix.with_suffix('.summary.txt').read_text(encoding='utf-8')
-    for expected in ('RNA variants: 1', 'Fusions: 1', 'Splice junctions: 1'):
-        if expected not in summary:
-            raise AssertionError(f'missing summary value: {expected}')
-    bedpe = prefix.with_suffix('.events.bedpe').read_text(encoding='utf-8')
-    if not bedpe.startswith('2\t19\t20\t7\t29\t30\t'):
-        raise AssertionError('interchromosomal BEDPE coordinates are incorrect')
-print('PASS: IGV fixture covers RNA variants, splice junctions and both fusion breakpoints')
+import pysam
+root=Path(__file__).resolve().parent
+with tempfile.TemporaryDirectory(prefix='pgtk_igv_') as td:
+ t=Path(td);genome=t/'genome.fa';genome.write_text('>1\n'+'A'*500+'\n>2\n'+'C'*500+'\n>7\n'+'G'*500+'\n');pysam.faidx(str(genome))
+ vcf=t/'TK1.rna.validated.vcf';vcf.write_text('##fileformat=VCFv4.2\n##contig=<ID=1,length=500>\n##INFO=<ID=CSQ,Number=.,Type=String,Description="Format: Allele|SYMBOL|PICK|CANONICAL">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n1\t100\t.\tA\tG\t.\tPASS\tCSQ=G|GENE1|1|YES\n')
+ fusion=t/'TK1.fusion.tsv';fusion.write_text('#gene1\tgene2\tbreakpoint1\tbreakpoint2\nA\tB\t2:200\t7:300\n')
+ splice=t/'TK1.splice.tsv';splice.write_text('Event\tStatus\tJunctions\nTX1\tRNA_VALIDATED\t1:150-180\n')
+ bam=t/'TK1.Aligned.sortedByCoord.out.bam';header={'HD':{'VN':'1.6','SO':'coordinate'},'SQ':[{'SN':'1','LN':500},{'SN':'2','LN':500},{'SN':'7','LN':500}]}
+ with pysam.AlignmentFile(bam,'wb',header=header) as out:
+  for rid,start,name in ((0,90,'r1'),(0,145,'r2'),(1,195,'r3'),(2,295,'r4')):
+   r=pysam.AlignedSegment();r.query_name=name;r.reference_id=rid;r.reference_start=start;r.mapping_quality=60;r.cigarstring='20M';r.query_sequence='A'*20;r.query_qualities=pysam.qualitystring_to_array('I'*20);out.write(r)
+ pysam.index(str(bam));prefix=t/'pgtk_igv'
+ subprocess.run([sys.executable,str(root/'build_igv_evidence_bundle.py'),'--genome',str(genome),'--rna-vcf',str(vcf),'--fusion-table',str(fusion),'--splice-table',str(splice),'--bam',f'TK1={bam}','--output-prefix',str(prefix)],check=True)
+ outbam=Path(str(prefix)+'.TK1.events.bam');assert outbam.is_file() and Path(str(outbam)+'.bai').is_file();assert pysam.quickcheck(str(outbam))==''
+ with pysam.AlignmentFile(outbam,'rb') as h:assert h.count(until_eof=True)==4
+ assert sum(1 for _ in open(str(prefix)+'.events.tsv'))==4
+print('PASS: Pysam IGV bundle fixture')

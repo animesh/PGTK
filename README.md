@@ -23,6 +23,15 @@ sbatch scratch.slurm
 
 The Slurm wrapper forwards arguments written after `--` to Nextflow and uses resume-compatible execution.
 
+
+## Local execution
+
+```bash
+bash run_local.sh
+```
+
+The local runner uses the same cached SRA files, references, and Apptainer images as the cluster workflow. Paths can be overridden with `SRA_DIR`, `REFERENCE_DOWNLOADS`, `CONTAINER_CACHE`, `WORK_DIR`, and `RESULTS_DIR`.
+
 ## Staged execution
 
 ### Stage 1: RNA pipeline, expression, GO, custom FASTAs, and reports
@@ -123,7 +132,7 @@ The workflow includes:
 - monolithic GATK SplitNCigarReads
 - 24-way HaplotypeCaller scattering per sample
 - shard validation, GatherVcfs, indexing, and GenotypeGVCFs
-- publication of raw, filtered, PASS, VEP-annotated, and RNA-validated VCFs
+- publication of raw, normalized, separate SNP/indel raw, filtered and PASS, merged PASS, VEP-annotated, and RNA-validated VCFs
 - codon-level and supporting-read provenance validation
 - per-sample non-subtracted custom protein FASTAs
 - patient-aware baseline subtraction as a separate VCF/reporting branch
@@ -507,6 +516,14 @@ MaxQuant-enabled read-validation outputs are written under:
 ```text
 results/proteogenomics_validation/read_validation/
 ```
+
+Strict finding reviews are also generated for every normalized RNA/progression SNP or indel under:
+
+```text
+results/igv/findings/finding_reviews/<event_id>/
+```
+
+Each finding directory contains exact-ALT, clean-reference and display BAMs with indexes, excluded/read-classification tables, summary TSV, support BED, IGV batch and session files, README, snapshot command, and a self-contained `review_event.sh`. The root contains `findings_manifest.tsv` and `run_all_reviews.sh`. Default thresholds are MAPQ 20, base quality 20, and 20 deterministic reference display reads.
 
 ## MultiQC
 
