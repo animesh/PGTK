@@ -51,3 +51,9 @@ sbatch scratch.slurm -- \
   --finding_priority_genes GENE1,GENE2 \
   --igv_report_limit 0
 ```
+
+### Consolidated IGV output
+
+`BUILD_FINDING_IGV_REVIEWS` now writes one flat `finding_reviews` bundle for all selected findings. It contains shared manifests, BED tracks, one IGV batch, one IGV session, and four BAM categories per sample with indexes. It no longer creates one directory and approximately 17 files per finding.
+
+`--igv_report_limit` now limits the deterministic rows included in the single consolidated HTML report. A value of `0` includes every finding selected by the priority mode.

@@ -33,3 +33,9 @@ Every failed attempt is preserved under `results/failure_logs/<job-id>/`, includ
 Memory escalation is consumed by every GATK command through a Java maximum heap equal to 80 percent of the effective Nextflow task memory. The remaining 20 percent is reserved for native libraries, compression buffers, temporary structures and operating-system overhead. MarkDuplicates garbage-collector threads are bounded by the effective task CPU allocation.
 
 CPU escalation is enabled only for commands that explicitly consume `task.cpus`, including fasterq-dump, FastQC, Trim Galore, STAR, samtools sorting and indexing, HaplotypeCaller PairHMM, VEP, StringTie and threaded validation scripts. Processes without a supported tool-level thread control keep their calibrated CPU count while RAM still increases on retries. This prevents requesting idle CPUs merely because a task was retried.
+
+## Completed run 19199689 calibration
+
+`VALIDATE_VARIANT_READ_PROVENANCE` used 9.1 GB peak RSS for TK13 after the 8 GB attempt exited 137. The portable profile now keeps CPU fixed at 2 and requests 12 GB, 24 GB, and 48 GB across attempts. CPU is not escalated because the completed attempt used less than one effective core.
+
+IGV report preparation now caps displayed ALT reads separately from the complete exact-ALT BAM. Full evidence BAMs remain published, while HTML reports use capped display BAMs to control embedded-report size.

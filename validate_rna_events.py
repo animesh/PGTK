@@ -52,8 +52,7 @@ def explain(reasons, passed):
 def ref_base(genome, chrom, pos, length):
     import pysam
     with pysam.FastaFile(genome) as fasta:
-        names=set(fasta.references)
-        plain=chrom[3:] if chrom.startswith('chr') else chrom
+        names=set(fasta.references); plain=chrom[3:] if chrom.startswith('chr') else chrom
         resolved=next((x for x in (chrom,plain,'chr'+plain) if x in names),None)
         if resolved is None: raise ValueError(f'contig not found: {chrom}')
         return fasta.fetch(resolved,pos-1,pos-1+length).upper()
@@ -95,10 +94,8 @@ def variant_mode(a):
             (accepted if status=='RNA_VALIDATED' else rejected).append(line)
     import pysam
     out=Path(a.output_prefix)
-    validated_plain=Path(f'{out}.validated.vcf')
-    rejected_plain=Path(f'{out}.rejected.vcf')
-    validated_plain.write_text(''.join(headers+accepted),encoding='utf-8')
-    rejected_plain.write_text(''.join(headers+rejected),encoding='utf-8')
+    validated_plain=Path(f'{out}.validated.vcf'); rejected_plain=Path(f'{out}.rejected.vcf')
+    validated_plain.write_text(''.join(headers+accepted),encoding='utf-8'); rejected_plain.write_text(''.join(headers+rejected),encoding='utf-8')
     pysam.tabix_compress(str(validated_plain),f'{out}.validated.vcf.gz',force=True)
     pysam.tabix_index(f'{out}.validated.vcf.gz',preset='vcf',force=True)
     pysam.tabix_compress(str(rejected_plain),f'{out}.rejected.vcf.gz',force=True)

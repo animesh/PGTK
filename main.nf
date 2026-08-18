@@ -41,14 +41,18 @@ params.indel_filter_read_pos_rank_sum = -20.0
 params.finding_review_mapq = 20
 params.finding_review_baseq = 20
 params.finding_review_reference_reads = 20
-params.finding_classes = 'rna_variant,progression_variant'
+params.finding_classes = 'rna_variant,progression_variant,fusion,splice_junction'
 params.finding_primary_class_order = 'rna_variant,progression_variant'
 params.finding_priority_mode = 'all'
 params.finding_priority_genes = ''
 params.finding_priority_impacts = ''
 params.finding_priority_consequences = ''
 params.generate_priority_igv_reports = true
-params.igv_report_limit = 0
+params.igv_report_classes = 'rna_variant,progression_variant,fusion,splice_junction'
+params.igv_report_max_reads = 100
+params.igv_report_max_file_size_mb = 64
+params.igv_report_gene_filter = ''
+params.igv_report_sample_filter = ''
 params.igv_report_timeout_seconds = 600
 params.igv_report_title_prefix = 'PGTK finding'
 params.run_external_vcf_comparison = false
@@ -842,7 +846,7 @@ process VALIDATE_VARIANT_CODONS {
 
 process VALIDATE_VARIANT_READ_PROVENANCE {
     tag "${meta.sample}:variant_supporting_read_provenance"
-    cpus 2; memory '8 GB'; time '8h'; disk '100 GB'
+    cpus 2; memory '12 GB'; time '8h'; disk '100 GB'
     container "${params.pysam_image}"
     input:
     tuple val(meta), path(vcf), path(tbi), path(bam), path(bai)
@@ -1045,7 +1049,7 @@ process GFFCOMPARE_NOVEL {
 
     if [[ ! -s \${prefix}.annotated.gtf ]]; then
         echo "ERROR: gffcompare did not create a non-empty annotated GTF" >&2
-        find . -maxdepth 1 -type f -printf '%f %s bytes\n' | sort >&2
+        for file in ./*; do test -f "\$file" || continue; bytes=\$(wc -c < "\$file"); printf '%s %s bytes\n' "\${file#./}" "\$bytes"; done | sort >&2
         exit 1
     fi
 
@@ -1548,7 +1552,7 @@ process BUILD_IGV_EVIDENCE_BUNDLE {
 }
 
 process BUILD_FINDING_IGV_REVIEWS {
-    tag 'strict_finding_igv_reviews'
+    tag 'consolidated_strict_finding_igv_bundle'
     cpus 2; memory '12 GB'; time '48h'; disk '500 GB'
     container "${params.pysam_image}"
     publishDir "${params.outdir}/igv/findings", mode:'copy'
@@ -1565,93 +1569,79 @@ process BUILD_FINDING_IGV_REVIEWS {
     def bamArgs = bamFiles.collect { bam ->
         def matcher = bam.name =~ /^pgtk_igv\.([^.]+)\.events\.bam$/
         if (!matcher.matches()) error "Cannot derive sample identifier from event BAM: ${bam.name}"
-        def sample = matcher.group(1)
-        "--bam '${sample}=${bam}'"
+        "--bam '${matcher.group(1)}=${bam}'"
     }.join(' ')
     """
     set -euo pipefail
     mkdir -p finding_reviews
-    python3 ${review_script} \
-        --events ${events} \
-        ${bamArgs} \
-        --genome ${genome} \
-        --output-dir finding_reviews \
-        --padding ${params.read_validation_padding} \
-        --mapq ${params.finding_review_mapq} \
-        --baseq ${params.finding_review_baseq} \
-        --reference-display-reads ${params.finding_review_reference_reads} \
-        --finding-classes '${params.finding_classes}' \
-        --primary-class-order '${params.finding_primary_class_order}' \
-        --priority-mode '${params.finding_priority_mode}' \
-        --priority-genes '${params.finding_priority_genes}' \
-        --priority-impacts '${params.finding_priority_impacts}' \
-        --priority-consequences '${params.finding_priority_consequences}'
+    python3 ${review_script} \\
+        --events ${events} \\
+        ${bamArgs} \\
+        --genome ${genome} \\
+        --output-dir finding_reviews \\
+        --padding ${params.read_validation_padding} \\
+        --mapq ${params.finding_review_mapq} \\
+        --baseq ${params.finding_review_baseq} \\
+        --reference-display-reads ${params.finding_review_reference_reads} \\
+        --alt-display-reads ${params.igv_report_max_reads} \\
+        --finding-classes '${params.igv_report_classes}' \\
+        --primary-class-order '${params.finding_primary_class_order}' \\
+        --priority-mode '${params.finding_priority_mode}' \\
+        --priority-genes '${params.finding_priority_genes}' \\
+        --priority-impacts '${params.finding_priority_impacts}' \\
+        --priority-consequences '${params.finding_priority_consequences}' \\
+        --priority-limit 0 \\
+        --gene-filter '${params.igv_report_gene_filter}' \\
+        --sample-filter '${params.igv_report_sample_filter}'
     test -s finding_reviews/findings_manifest.tsv
+    test -s finding_reviews/bam_manifest.tsv
+    test -s finding_reviews/support_labels.bed
+    test -s finding_reviews/priority_findings.bed
+    test -s finding_reviews/review.igv.batch.txt
+    test -s finding_reviews/igv.session.xml
     finding_count=\$(awk 'END { print NR - 1 }' finding_reviews/findings_manifest.tsv)
-    if [[ "\$finding_count" -le 0 ]]; then
-        echo 'ERROR: strict finding review produced zero findings' >&2
-        echo 'Event classes:' >&2
-        awk -F '\t' 'NR > 1 { count[\$3]++ } END { for (class in count) print class, count[class] }' ${events} >&2
-        echo 'Configured BAM mappings:' >&2
-        printf '%s\n' ${bamArgs} >&2
+    test "\$finding_count" -gt 0
+    bam_rows=\$(awk 'END { print NR - 1 }' finding_reviews/bam_manifest.tsv)
+    sample_count=\$(( bam_rows / 4 ))
+    entry_count=\$(find finding_reviews -mindepth 1 | wc -l)
+    maximum_entries=\$(( 20 + 8 * sample_count ))
+    if test "\$entry_count" -gt "\$maximum_entries"; then
+        echo "ERROR: consolidated finding bundle has \$entry_count entries; expected at most \$maximum_entries" >&2
         exit 1
     fi
-    printf 'Generated %s strict finding reviews\n' "\$finding_count"
+    printf 'Generated one consolidated strict IGV bundle for %s findings using %s filesystem entries\n' "\$finding_count" "\$entry_count"
     """
 }
-
-process GENERATE_PRIORITY_IGV_REPORTS {
-    tag 'priority_igv_reports'
-    cpus 2; memory '16 GB'; time '48h'; disk '150 GB'
+process BUILD_FINDING_EXPLORER {
+    tag 'complete_database_free_finding_explorer'
+    cpus 1; memory '4 GB'; time '2h'; disk '20 GB'
     container "${params.container_cache}/quay.io-biocontainers-igv-reports-1.16.0--pyh7e72e81_0.img"
-    publishDir "${params.outdir}/igv/findings/reports", mode:'copy'
+    publishDir "${params.outdir}/igv/findings", mode:'copy'
     input:
     path finding_reviews
     path genome
+    path explorer_script
+    path server_launcher
     output:
-    path 'igv_reports', emit: reports
+    path 'finding_explorer', emit: explorer
     script:
     """
     set -euo pipefail
-    export HOME="\$PWD/igv_reports_home"
-    export XDG_CACHE_HOME="\$PWD/igv_reports_cache"
-    export TMPDIR="\$PWD/igv_reports_tmp"
-    mkdir -p igv_reports "\$HOME" "\$XDG_CACHE_HOME" "\$TMPDIR"
-    report_command=\$(command -v create_report || command -v create_reports)
-    [[ -x "\$report_command" ]] || { echo 'ERROR: IGV Reports command not found' >&2; exit 1; }
-    if [[ ${params.igv_report_limit} -eq 0 ]]; then
-        mapfile -t batches < ${finding_reviews}/priority_batches.txt
-    else
-        mapfile -t batches < <(head -n ${params.igv_report_limit} ${finding_reviews}/priority_batches.txt)
-    fi
-    (( \${#batches[@]} > 0 )) || { echo 'ERROR: no prioritized findings were selected' >&2; exit 1; }
-    printf 'EventID\tReport\n' > igv_reports/report_manifest.tsv
-    generated=0
-    for source_batch in "\${batches[@]}"; do
-        finding=\$(basename "\$source_batch" .review.igv.batch.txt)
-        finding_dir=${finding_reviews}/\$finding
-        bed=\$finding_dir/\$finding.support_labels.bed
-        alt_bam=\$finding_dir/\$finding.exact_alt.unique.bam
-        alt_bai=\$alt_bam.bai
-        ref_bam=\$finding_dir/\$finding.reference.display.bam
-        ref_bai=\$ref_bam.bai
-        for required in "\$bed" "\$alt_bam" "\$alt_bai" "\$ref_bam" "\$ref_bai"; do
-            [[ -s "\$required" ]] || { echo "ERROR: missing report input: \$required" >&2; exit 1; }
-        done
-        output=\$PWD/igv_reports/\$finding.html
-        timeout ${params.igv_report_timeout_seconds} "\$report_command" "\$bed" \
-            --fasta ${genome} \
-            --tracks "\$bed" "\$alt_bam" "\$ref_bam" \
-            --flanking ${params.read_validation_padding} \
-            --title "${params.igv_report_title_prefix}: \$finding" \
-            --output "\$output"
-        [[ -s "\$output" ]] || { echo "ERROR: report was not created: \$output" >&2; exit 1; }
-        grep -qi '<html' "\$output"
-        printf '%s\t%s\n' "\$finding" "\$finding.html" >> igv_reports/report_manifest.tsv
-        generated=\$((generated + 1))
-    done
-    printf 'Generated %s self-contained offline IGV reports\n' "\$generated" > igv_reports/report_summary.txt
-    test "\$generated" -eq "\${#batches[@]}"
+    mkdir -p finding_explorer
+    python3 ${explorer_script} --manifest ${finding_reviews}/findings_manifest.tsv --bam-manifest ${finding_reviews}/bam_manifest.tsv --genome ${genome} --flanking ${params.read_validation_padding} --output-dir finding_explorer
+    cp ${server_launcher} finding_explorer/serve_explorer.sh
+    total=\$(awk -F': ' '\$1=="Findings" {print \$2}' finding_explorer/coverage_summary.txt)
+    records=\$(awk -F': ' '\$1=="Partition records" {print \$2}' finding_explorer/coverage_summary.txt)
+    discarded=\$(awk -F': ' '\$1=="Findings discarded" {print \$2}' finding_explorer/coverage_summary.txt)
+    databases=\$(awk -F': ' '\$1=="Database files" {print \$2}' finding_explorer/coverage_summary.txt)
+    test "\$total" -gt 0
+    test "\$total" -eq "\$records"
+    test "\$discarded" -eq 0
+    test "\$databases" -eq 0
+    test -z "\$(find finding_explorer -type f -name '*.sqlite' -print -quit)"
+    test -z "\$(find finding_explorer -type f -name '*.sqlite3' -print -quit)"
+    test -z "\$(find finding_explorer -type f -name '*.db' -print -quit)"
+    printf 'Generated database-free explorer for %s findings; discarded 0\n' "\$total"
     """
 }
 
@@ -2243,8 +2233,9 @@ workflow {
     if (!params.pysam_image) error '--pysam_image is required'
     if (!params.ensembl_pep) error '--ensembl_pep is required'
     if (!(params.finding_priority_mode in ['all','filter'])) error '--finding_priority_mode must be all or filter'
-    if ((params.igv_report_limit as int) < 0) error '--igv_report_limit must be zero or a positive integer'
     if ((params.igv_report_timeout_seconds as int) <= 0) error '--igv_report_timeout_seconds must be a positive integer'
+    if ((params.igv_report_max_reads as int) <= 0) error '--igv_report_max_reads must be positive'
+    if ((params.igv_report_max_file_size_mb as int) < 0) error '--igv_report_max_file_size_mb must be zero or positive'
     if ((params.finding_review_mapq as int) < 0) error '--finding_review_mapq must be non-negative'
     if ((params.finding_review_baseq as int) < 0) error '--finding_review_baseq must be non-negative'
     if ((params.finding_review_reference_reads as int) < 0) error '--finding_review_reference_reads must be non-negative'
@@ -2474,7 +2465,9 @@ workflow {
         finding_review_script
     )
     if (params.generate_priority_igv_reports) {
-        priority_igv_reports=GENERATE_PRIORITY_IGV_REPORTS(finding_reviews.reviews, refs.genome)
+        finding_explorer_script=file("${projectDir}/build_finding_explorer.py",checkIfExists:true)
+        finding_explorer_launcher=file("${projectDir}/serve_finding_explorer.sh",checkIfExists:true)
+        finding_explorer=BUILD_FINDING_EXPLORER(finding_reviews.reviews, refs.genome, finding_explorer_script, finding_explorer_launcher)
     }
     comparative_report_script=file("${projectDir}/build_comparative_advantage_report.py", checkIfExists:true)
     comparative_report=BUILD_COMPARATIVE_ADVANTAGE_REPORT(
