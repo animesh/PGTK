@@ -91,13 +91,41 @@ params.go_variant_background = 'genome'
 params.go_variant_biotypes = 'protein_coding'
 
 
+def strictBooleanParam(value, String name) {
+    if (value instanceof Boolean) return value
+    if (value == null) error "${name} requires true or false"
+    def normalized = value.toString().trim().toLowerCase()
+    if (normalized in ['true','1','yes','y','on']) return true
+    if (normalized in ['false','0','no','n','off']) return false
+    error "${name} must be true or false; received '${value}'"
+}
+
+def booleanText(value, String name) {
+    return strictBooleanParam(value, name) ? 'true' : 'false'
+}
+
+
 def resolveExternalVcf(String directory, String srr, String suffix) {
     def root = new File(directory)
     if (!root.isDirectory()) error "External caller folder not found: ${directory}"
     def expected = "${srr}${suffix}"
+    def preferred = [
+        new File(root, expected),
+        new File(new File(root, srr), expected)
+    ].findAll { it.isFile() }.unique { it.canonicalPath }
+    if (preferred.size() == 1) {
+        if (preferred[0].length() == 0L) error "External caller VCF is empty: ${preferred[0]}"
+        return file(preferred[0].toString(), checkIfExists:true)
+    }
+    if (preferred.size() > 1) error "Ambiguous external caller VCF for ${srr}: ${preferred*.toString().join(', ')}"
     def matches = []
-    root.eachFileRecurse { f -> if (f.isFile() && f.name == expected) matches << f }
-    if (matches.size() != 1) error "Expected exactly one ${expected} below ${directory}; found ${matches.size()}"
+    root.eachFileRecurse { candidate ->
+        if (candidate.isFile() && candidate.name == expected) matches << candidate
+    }
+    matches = matches.unique { it.canonicalPath }
+    if (matches.size() == 0) error "External caller VCF not found. Expected ${root}/${expected} or ${root}/${srr}/${expected}"
+    if (matches.size() > 1) error "Ambiguous external caller VCF for ${srr}; found ${matches.size()} matches below ${directory}: ${matches*.toString().join(', ')}"
+    if (matches[0].length() == 0L) error "External caller VCF is empty: ${matches[0]}"
     return file(matches[0].toString(), checkIfExists:true)
 }
 
@@ -273,7 +301,9 @@ process FASTQC_RAW {
     script:
     """
     mkdir ${meta.sample}.raw_fastqc
-    fastqc --threads ${task.cpus} --outdir ${meta.sample}.raw_fastqc ${r1} ${r2}
+    ln -s ${r1} ${meta.sample}.raw.R1.fastq.gz
+    ln -s ${r2} ${meta.sample}.raw.R2.fastq.gz
+    fastqc --threads ${task.cpus} --outdir ${meta.sample}.raw_fastqc ${meta.sample}.raw.R1.fastq.gz ${meta.sample}.raw.R2.fastq.gz
     """
 }
 
@@ -306,7 +336,9 @@ process FASTQC_TRIMMED {
     script:
     """
     mkdir ${meta.sample}.trimmed_fastqc
-    fastqc --threads ${task.cpus} --outdir ${meta.sample}.trimmed_fastqc ${r1} ${r2}
+    ln -s ${r1} ${meta.sample}.trimmed.R1.fastq.gz
+    ln -s ${r2} ${meta.sample}.trimmed.R2.fastq.gz
+    fastqc --threads ${task.cpus} --outdir ${meta.sample}.trimmed_fastqc ${meta.sample}.trimmed.R1.fastq.gz ${meta.sample}.trimmed.R2.fastq.gz
     """
 }
 
@@ -488,7 +520,7 @@ process HAPLOTYPE_CALLER {
     tuple val(meta), val(interval.baseName), path("${meta.sample}.${interval.baseName}.g.vcf.gz"), path("${meta.sample}.${interval.baseName}.g.vcf.gz.tbi")
     script:
     def javaHeapGb = Math.max(1, Math.floor(task.memory.toGiga() * 0.80) as int)
-    def softClipArg = params.hc_dont_use_soft_clipped_bases ? '--dont-use-soft-clipped-bases true' : '--dont-use-soft-clipped-bases false'
+    def softClipArg = strictBooleanParam(params.hc_dont_use_soft_clipped_bases, '--hc_dont_use_soft_clipped_bases') ? '--dont-use-soft-clipped-bases true' : '--dont-use-soft-clipped-bases false'
     def pcrIndelArg = params.hc_pcr_indel_model ? "--pcr-indel-model ${params.hc_pcr_indel_model}" : ''
     """
     set -euo pipefail
@@ -698,7 +730,7 @@ process VARIANT_STAGE_QC {
     path "${meta.sample}.variant_stages.provenance.tsv", emit: provenance
     script:
     """
-    python ${summarizer} --sample ${meta.sample} --raw ${raw_vcf} --pass-vcf ${pass_vcf} --rna ${rna_vcf} --genome ${genome} --calling-confidence ${params.hc_calling_confidence} --soft-clipped-setting ${params.hc_dont_use_soft_clipped_bases} --pcr-indel-model ${params.hc_pcr_indel_model} --output-prefix ${meta.sample}.variant_stages
+    python ${summarizer} --sample ${meta.sample} --raw ${raw_vcf} --pass-vcf ${pass_vcf} --rna ${rna_vcf} --genome ${genome} --calling-confidence ${params.hc_calling_confidence} --soft-clipped-setting ${booleanText(params.hc_dont_use_soft_clipped_bases, '--hc_dont_use_soft_clipped_bases')} --pcr-indel-model ${params.hc_pcr_indel_model} --output-prefix ${meta.sample}.variant_stages
     """
 }
 
@@ -1221,12 +1253,12 @@ process COUNT_GENES_PER_SAMPLE {
     output:
     tuple val(meta), path("${meta.sample}.gene_counts.tsv"), path("${meta.sample}.gene_counts.tsv.summary")
     script:
-    def paired = params.gene_count_count_read_pairs ? '-p --countReadPairs' : ''
-    def bothEnds = params.gene_count_require_both_ends ? '-B' : ''
-    def chimeric = params.gene_count_exclude_chimeric ? '-C' : ''
-    def primary = params.gene_count_primary_only ? '--primary' : ''
-    def overlap = params.gene_count_allow_multi_overlap ? '-O' : ''
-    def multi = params.gene_count_count_multimapping ? '-M' : ''
+    def paired = strictBooleanParam(params.gene_count_count_read_pairs, '--gene_count_count_read_pairs') ? '-p --countReadPairs' : ''
+    def bothEnds = strictBooleanParam(params.gene_count_require_both_ends, '--gene_count_require_both_ends') ? '-B' : ''
+    def chimeric = strictBooleanParam(params.gene_count_exclude_chimeric, '--gene_count_exclude_chimeric') ? '-C' : ''
+    def primary = strictBooleanParam(params.gene_count_primary_only, '--gene_count_primary_only') ? '--primary' : ''
+    def overlap = strictBooleanParam(params.gene_count_allow_multi_overlap, '--gene_count_allow_multi_overlap') ? '-O' : ''
+    def multi = strictBooleanParam(params.gene_count_count_multimapping, '--gene_count_count_multimapping') ? '-M' : ''
     """
     set -euo pipefail
     featureCounts \
@@ -1370,7 +1402,7 @@ process MERGE_EXPRESSION_GO {
 
 process PREPARE_EXPRESSION_MULTIQC_CONTENT {
     tag 'expression_GO_multiqc_content'
-    cpus 1; memory '1 GB'; time '1h'; disk '10 GB'
+    cpus 1; memory '2 GB'; time '2h'; disk '20 GB'
     container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
     input:
     path expression_ora
@@ -1378,38 +1410,13 @@ process PREPARE_EXPRESSION_MULTIQC_CONTENT {
     path expression_summary
     path variant_set_go
     path variant_set_summary
+    path content_builder
     output:
     path 'expression_multiqc_content'
     script:
     """
     set -euo pipefail
-    mkdir expression_multiqc_content
-    cp ${expression_summary} expression_multiqc_content/expression_go_summary_mqc.tsv
-    cp ${expression_ora} expression_multiqc_content/expression_go_ora_mqc.tsv
-    cp ${ranked_go} expression_multiqc_content/expression_ranked_go_mqc.tsv
-    cp ${variant_set_summary} expression_multiqc_content/progression_variant_set_go_summary_mqc.tsv
-    cp ${variant_set_go} expression_multiqc_content/progression_variant_set_go_mqc.tsv
-    python - ${expression_summary} ${variant_set_summary} <<'PY_MQC_EXPRESSION'
-import csv
-import html
-import pathlib
-import sys
-
-def table(path):
-    with open(path, encoding='utf-8', newline='') as handle:
-        rows = list(csv.DictReader(handle, delimiter='\t'))
-    if not rows:
-        return '<p>No rows.</p>'
-    fields = list(rows[0])
-    head = ''.join('<th>' + html.escape(field) + '</th>' for field in fields)
-    body = ''.join('<tr>' + ''.join('<td>' + html.escape(str(row.get(field, ''))) + '</td>' for field in fields) + '</tr>' for row in rows)
-    return '<table><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table>'
-
-content = '<h2>Expression and progression-set Gene Ontology analysis</h2>'
-content += '<h3>Expression GO summary</h3>' + table(sys.argv[1])
-content += '<h3>Progression variant-set GO summary</h3>' + table(sys.argv[2])
-pathlib.Path('expression_multiqc_content/22_expression_go_mqc.html').write_text(content, encoding='utf-8')
-PY_MQC_EXPRESSION
+    python3 ${content_builder} --output-dir expression_multiqc_content --expression-ora ${expression_ora} --ranked-go ${ranked_go} --expression-summary ${expression_summary} --variant-set-go ${variant_set_go} --variant-set-summary ${variant_set_summary}
     """
 }
 
@@ -1612,6 +1619,57 @@ process BUILD_FINDING_IGV_REVIEWS {
     printf 'Generated one consolidated strict IGV bundle for %s findings using %s filesystem entries\n' "\$finding_count" "\$entry_count"
     """
 }
+
+process ANALYZE_VARIANT_LANDSCAPE {
+    tag 'variant_types_and_nonsynonymous_GO'
+    cpus 1; memory '8 GB'; time '2h'; disk '30 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/variant_landscape", mode:'copy', pattern:'variant_landscape.*'
+    input:
+    path raw_vcfs
+    path normalized_vcfs
+    path filtered_vcfs
+    path pass_vcfs
+    path vep_vcfs
+    path rna_vcfs
+    path nonbaseline_vcfs
+    path baseline_only_vcfs
+    path shared_vcfs
+    path go_mapping
+    path analysis_script
+    output:
+    path 'variant_landscape.summary.tsv', emit: summary
+    path 'variant_landscape.nonsynonymous_genes.tsv', emit: genes
+    path 'variant_landscape.go_significant.tsv', emit: go_significant
+    path 'variant_landscape.go_top.tsv', emit: go_top
+    path 'variant_landscape.go_summary.tsv', emit: go_summary
+    path 'variant_landscape.report.md', emit: report
+    path 'variant_landscape.multiqc', emit: multiqc
+    script:
+    def args = []
+    raw_vcfs.each { args << "--vcf raw_genotyped=${it}" }
+    normalized_vcfs.each { args << "--vcf normalized=${it}" }
+    filtered_vcfs.each { args << "--vcf hard_filtered_all=${it}" }
+    pass_vcfs.each { args << "--vcf hard_filter_pass=${it}" }
+    vep_vcfs.each { args << "--vcf vep_pass=${it}" }
+    rna_vcfs.each { args << "--vcf rna_validated=${it}" }
+    nonbaseline_vcfs.each { args << "--vcf progression_nonbaseline_only=${it}" }
+    baseline_only_vcfs.each { args << "--vcf progression_baseline_only=${it}" }
+    shared_vcfs.each { args << "--vcf progression_shared_with_baseline=${it}" }
+    """
+    set -euo pipefail
+    python3 ${analysis_script} ${args.join(' ')} \
+        --go-mapping ${go_mapping} \
+        --go-min-size ${params.go_min_size} \
+        --go-max-size ${params.go_max_size} \
+        --fdr-threshold ${params.go_fdr_threshold} \
+        --go-top 100 \
+        --max-significant-rows 100000 \
+        --max-output-mb 100 \
+        --output-prefix variant_landscape
+    """
+}
+
 process BUILD_FINDING_EXPLORER {
     tag 'complete_database_free_finding_explorer'
     cpus 1; memory '4 GB'; time '2h'; disk '20 GB'
@@ -1628,10 +1686,10 @@ process BUILD_FINDING_EXPLORER {
     """
     set -euo pipefail
     mkdir -p finding_explorer
-    python3 ${explorer_script} --manifest ${finding_reviews}/findings_manifest.tsv --bam-manifest ${finding_reviews}/bam_manifest.tsv --genome ${genome} --flanking ${params.read_validation_padding} --output-dir finding_explorer
+    python3 ${explorer_script} --manifest ${finding_reviews}/findings_manifest.tsv --excluded-reads ${finding_reviews}/excluded_reads.tsv --bam-manifest ${finding_reviews}/bam_manifest.tsv --genome ${genome} --flanking ${params.read_validation_padding} --output-dir finding_explorer
     cp ${server_launcher} finding_explorer/serve_explorer.sh
     total=\$(awk -F': ' '\$1=="Findings" {print \$2}' finding_explorer/coverage_summary.txt)
-    records=\$(awk -F': ' '\$1=="Partition records" {print \$2}' finding_explorer/coverage_summary.txt)
+    records=\$(awk -F': ' '\$1=="Embedded compact records" {print \$2}' finding_explorer/coverage_summary.txt)
     discarded=\$(awk -F': ' '\$1=="Findings discarded" {print \$2}' finding_explorer/coverage_summary.txt)
     databases=\$(awk -F': ' '\$1=="Database files" {print \$2}' finding_explorer/coverage_summary.txt)
     test "\$total" -gt 0
@@ -1681,10 +1739,11 @@ process BUILD_COMPARATIVE_ADVANTAGE_REPORT {
 }
 
 process PREPARE_COMPARATIVE_MULTIQC_CONTENT {
-    tag 'comparative_multiqc_content'
-    cpus 1; memory '2 GB'; time '2h'; disk '20 GB'
+    tag 'complete_core_multiqc_content'
+    cpus 1; memory '4 GB'; time '4h'; disk '30 GB'
     container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
     input:
+    path samplesheet
     path report
     path variant_inventory
     path fasta_inventory
@@ -1695,27 +1754,16 @@ process PREPARE_COMPARATIVE_MULTIQC_CONTENT {
     path progression_summary
     path progression_enrichment
     path progression_pairwise_categories
+    path complete_report
+    path rna_failure_report
+    path rna_variant_explanations
+    path report_builder
+    val maxquant_enabled
     output: path 'comparative_multiqc_content'
     script:
     """
-    mkdir comparative_multiqc_content
-    cp ${variant_inventory} comparative_multiqc_content/comparative_advantage_mqc.tsv
-    cp ${fasta_inventory} comparative_multiqc_content/fasta_inventory_mqc.tsv
-    cp ${rna_inventory} comparative_multiqc_content/rna_event_inventory_mqc.tsv
-    cp ${external_comparison} comparative_multiqc_content/external_caller_comparison_mqc.tsv
-    cp ${summary} comparative_multiqc_content/advantage_summary_mqc.tsv
-    cp ${progression_summary} comparative_multiqc_content/progression_biology_summary_mqc.tsv
-    cp ${progression_enrichment} comparative_multiqc_content/progression_go_enrichment_mqc.tsv
-    cp ${progression_pairwise_categories} comparative_multiqc_content/progression_pairwise_go_contrasts_mqc.tsv
-    python - ${report} ${progression_report} <<'PY_MQC'
-import html,pathlib,sys
-for source,filename,title in [
-    (sys.argv[1],'18_comparative_biological_advantage_mqc.html','Comparative biological advantage'),
-    (sys.argv[2],'20_progression_biology_mqc.html','Progression biology and scalable sample contrasts'),
-]:
-    text=pathlib.Path(source).read_text(encoding='utf-8',errors='replace')
-    pathlib.Path('comparative_multiqc_content',filename).write_text('<h2>'+html.escape(title)+'</h2><pre style="white-space:pre-wrap">'+html.escape(text)+'</pre>',encoding='utf-8')
-PY_MQC
+    set -euo pipefail
+    python3 ${report_builder} --output-dir comparative_multiqc_content --samples ${samplesheet} --variant-inventory ${variant_inventory} --fasta-inventory ${fasta_inventory} --rna-inventory ${rna_inventory} --external-comparison ${external_comparison} --summary ${summary} --progression-summary ${progression_summary} --progression-enrichment ${progression_enrichment} --progression-pairwise ${progression_pairwise_categories} --complete-report ${complete_report} --rna-failure-report ${rna_failure_report} --rna-variant-explanations ${rna_variant_explanations} --comparative-report ${report} --progression-report ${progression_report} --maxquant-enabled ${maxquant_enabled}
     """
 }
 
@@ -2115,94 +2163,49 @@ process VALIDATE_PROTEOGENOMIC_READS {
 }
 
 process PREPARE_FINAL_MULTIQC_CONTENT {
-    tag 'integrated_report_content'
-    cpus 1; memory '2 GB'; time '6h'; disk '50 GB'
+    tag 'compact_integrated_report_content'
+    cpus 1; memory '2 GB'; time '2h'; disk '10 GB'
     container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
     input:
-    path complete_report
-    path rna_failure_report
-    path rna_variant_explanations
-    path variant_codon_report
-    path variant_codon_summary
-    path codon_mismatch_report
-    path codon_mismatch_summary
-    path integrated_variant_evidence_report
-    path variant_read_provenance_report
-    path variant_read_provenance_summary
-    path proteogenomics_report
+    path variant_inventory
+    path rna_inventory
+    path progression_summary
+    path external_comparison
+    path expression_ora
+    path ranked_go
+    path variant_set_go
     path proteogenomics_summary
-    path proteogenomics_classification_report
-    path proteogenomics_failure_report
-    path read_validation_report
-    path read_validation_summary
-    path validation_semantics
-    path comparative_report
-    path comparative_summary
-    path progression_biology_report
-    path progression_biology_summary
+    path integrated_report
+    path evidence_classification
+    path read_summary
+    path codon_summary
+    path provenance_summary
+    path compact_builder
+    val maxquant_enabled
     output:
     path 'multiqc_custom_content', emit: content
     script:
     """
     set -euo pipefail
-    mkdir multiqc_custom_content
-    python - \\
-      ${complete_report} \\
-      ${rna_failure_report} \\
-      ${rna_variant_explanations} \\
-      ${variant_codon_report} \\
-      ${variant_codon_summary} \\
-      ${codon_mismatch_report} \\
-      ${codon_mismatch_summary} \\
-      ${integrated_variant_evidence_report} \\
-      ${variant_read_provenance_report} \\
-      ${variant_read_provenance_summary} \\
-      ${proteogenomics_report} \\
-      ${proteogenomics_summary} \\
-      ${proteogenomics_classification_report} \\
-      ${proteogenomics_failure_report} \\
-      ${read_validation_report} \\
-      ${read_validation_summary} \\
-      ${validation_semantics} \
-      ${comparative_report} \
-      ${comparative_summary} \
-      ${progression_biology_report} \
-      ${progression_biology_summary} <<'PY_MQC'
-import html
-import pathlib
-import sys
-names = [
-    ('01_complete_findings_mqc.html','Complete RNA-seq and proteogenomics findings'),
-    ('02_rna_validation_failures_mqc.html','RNA validation failures'),
-    ('03_rna_variant_explanations_mqc.html','Why RNA variant candidates fail validation'),
-    ('04_variant_codon_validation_mqc.html','Independent genome, RNA-read and codon validation'),
-    ('05_variant_codon_summary_mqc.html','Independent variant-codon validation summary'),
-    ('06_codon_mismatch_investigation_mqc.html','Codon-translation mismatch investigation'),
-    ('07_codon_mismatch_summary_mqc.html','Codon-mismatch diagnostic table'),
-    ('08_strict_integrated_variant_evidence_mqc.html','Strict integrated variant evidence'),
-    ('09_variant_read_provenance_mqc.html','Variant-supporting RNA reads and mapping provenance'),
-    ('10_variant_read_provenance_summary_mqc.html','Variant-supporting read summary'),
-    ('11_proteogenomics_evidence_mqc.html','Proteogenomics evidence'),
-    ('12_proteogenomics_summary_mqc.html','Proteogenomics evidence summary'),
-    ('13_proteogenomics_classification_mqc.html','Sample-matched and cross-sample evidence'),
-    ('14_proteogenomics_failures_mqc.html','Proteogenomics validation failures'),
-    ('15_read_validation_mqc.html','Read-level validation'),
-    ('16_read_validation_summary_mqc.html','Read-level validation summary'),
-    ('17_validation_semantics_mqc.html','Validation statuses and failure-category semantics'),
-    ('18_comparative_biological_advantage_mqc.html','Comparative biological advantage'),
-    ('19_comparative_advantage_summary_mqc.html','Comparative advantage summary'),
-    ('20_progression_biology_mqc.html','Progression biology and scalable sample contrasts'),
-    ('21_progression_biology_summary_mqc.html','Progression biology summary'),
-]
-if len(sys.argv[1:]) != len(names):
-    raise SystemExit(f'Expected {len(names)} report inputs, received {len(sys.argv[1:])}')
-for source,(filename,title) in zip(sys.argv[1:],names):
-    text=pathlib.Path(source).read_text(encoding='utf-8',errors='replace')
-    body='<h3>'+html.escape(title)+'</h3><pre style="white-space:pre-wrap">'+html.escape(text)+'</pre>'
-    pathlib.Path('multiqc_custom_content',filename).write_text(body,encoding='utf-8')
-PY_MQC
+    python3 ${compact_builder} \
+      --output-dir multiqc_custom_content \
+      --variant-inventory ${variant_inventory} \
+      --rna-inventory ${rna_inventory} \
+      --progression-summary ${progression_summary} \
+      --external-comparison ${external_comparison} \
+      --expression-ora ${expression_ora} \
+      --ranked-go ${ranked_go} \
+      --variant-set-go ${variant_set_go} \
+      --proteogenomics-summary ${proteogenomics_summary} \
+      --integrated-report ${integrated_report} \
+      --evidence-classification ${evidence_classification} \
+      --read-summary ${read_summary} \
+      --codon-summary ${codon_summary} \
+      --provenance-summary ${provenance_summary} \
+      --maxquant-enabled ${maxquant_enabled}
     """
 }
+
 process MULTIQC_FINAL {
     tag 'integrated_final_report'
     cpus 4; memory '16 GB'; time '12h'; disk '150 GB'
@@ -2211,6 +2214,7 @@ process MULTIQC_FINAL {
     input:
     path qc_files
     path custom_content
+    path multiqc_config
     output:
     path 'multiqc_report.html', emit: report
     path 'multiqc_report_data', emit: data
@@ -2221,8 +2225,11 @@ process MULTIQC_FINAL {
         --force \\
         --title 'PGTK complete RNA-seq and proteogenomics report' \\
         --filename multiqc_report.html \\
+        --config ${multiqc_config} \\
         --data-dir \\
         --data-format tsv
+    rm -f multiqc_report_data/llms-full.txt
+    test "\$(stat -c %s multiqc_report.html)" -le 25000000 || { echo "ERROR: final MultiQC HTML exceeds 25 MB" >&2; exit 1; }
     """
 }
 
@@ -2324,7 +2331,7 @@ workflow {
     stage_summarizer=file("${projectDir}/summarize_variant_stages.py", checkIfExists:true)
     variant_stage_qc=VARIANT_STAGE_QC(stage_qc_inputs,refs.genome,stage_summarizer)
     external_comparison_tables = channel.value([file("${projectDir}/external_comparison.none.tsv", checkIfExists:true)])
-    if (params.run_external_vcf_comparison) {
+    if (strictBooleanParam(params.run_external_vcf_comparison, '--run_external_vcf_comparison')) {
         if (!params.external_vcf_dir) error '--external_vcf_dir is required when --run_external_vcf_comparison true'
         comparison_script=file("${projectDir}/compare_external_vcf.py", checkIfExists:true)
         external_raw_inputs=raw_variants.map { m,v,tbi ->
@@ -2376,6 +2383,14 @@ workflow {
     progression_pair_script=file("${projectDir}/compare_progression_pair.py", checkIfExists:true)
     progression_merge_script=file("${projectDir}/merge_progression_biology.py", checkIfExists:true)
     go_reference=PREPARE_GO_ANNOTATIONS(file(params.go_obo,checkIfExists:true),file(params.go_gaf,checkIfExists:true),go_preparation_script)
+    variant_landscape_script=file("${projectDir}/analyze_variant_landscape.py",checkIfExists:true)
+    variant_landscape=ANALYZE_VARIANT_LANDSCAPE(
+        raw_variants.map { m,v,t -> v }.collect(), normalized_variants.map { m,v,t -> v }.collect(),
+        genotype_result.filtered.map { m,v,t -> v }.collect(), genotype_result.pass.map { m,v,t -> v }.collect(),
+        annotated.map { m,v,t -> v }.collect(), validated_variants.validated.map { m,v,t -> v }.collect(),
+        prog.map { m,nv,nt,bv,bt,sv,st,su -> nv }.collect(), prog.map { m,nv,nt,bv,bt,sv,st,su -> bv }.collect(),
+        prog.map { m,nv,nt,bv,bt,sv,st,su -> sv }.collect(), go_reference.mapping, variant_landscape_script
+    )
     progression_sample_inputs=prog.map { m,nv,nt,bv,bt,sv,st,su -> tuple(m.sample,m,nv,nt) }.join(validated_variants.validated.map { m,v,t -> tuple(m.sample,v,t) }).map { sample,m,nv,nt,rv,rt -> tuple(m,nv,nt,rv,rt) }
     progression_sample_results=ANALYZE_PROGRESSION_SAMPLE(progression_sample_inputs,go_reference.mapping,progression_biology_script)
     progression_variant_sets=ANALYZE_PROGRESSION_VARIANT_SETS(
@@ -2383,7 +2398,7 @@ workflow {
         file(params.samplesheet,checkIfExists:true), go_reference.mapping, refs.gtf, expression_analysis_script
     )
     expression_multiqc_content = channel.empty()
-    if (params.run_expression_go) {
+    if (strictBooleanParam(params.run_expression_go, '--run_expression_go')) {
         expression_metadata = channel.fromPath(params.samplesheet, checkIfExists:true)
             .splitCsv(header:true)
             .map { row ->
@@ -2428,9 +2443,11 @@ workflow {
                 .collect(),
             file(params.samplesheet,checkIfExists:true), expression_analysis_script
         )
+        expression_multiqc_builder=file("${projectDir}/build_expression_multiqc_content.py",checkIfExists:true)
         expression_multiqc_content = PREPARE_EXPRESSION_MULTIQC_CONTENT(
             expression_go.ora, expression_go.ranked, expression_go.summary,
-            progression_variant_sets.enrichment, progression_variant_sets.summary
+            progression_variant_sets.enrichment, progression_variant_sets.summary,
+            expression_multiqc_builder
         )
     }
     progression_pair_left=progression_sample_results.map { m,a,g,e,c,su -> tuple(m.tk,m,a,g,e) }
@@ -2464,7 +2481,7 @@ workflow {
         refs.genome,
         finding_review_script
     )
-    if (params.generate_priority_igv_reports) {
+    if (strictBooleanParam(params.generate_priority_igv_reports, '--generate_priority_igv_reports')) {
         finding_explorer_script=file("${projectDir}/build_finding_explorer.py",checkIfExists:true)
         finding_explorer_launcher=file("${projectDir}/serve_finding_explorer.sh",checkIfExists:true)
         finding_explorer=BUILD_FINDING_EXPLORER(finding_reviews.reviews, refs.genome, finding_explorer_script, finding_explorer_launcher)
@@ -2488,18 +2505,7 @@ workflow {
         variant_read_provenance.summary,
         comparative_report_script
     )
-    comparative_multiqc=PREPARE_COMPARATIVE_MULTIQC_CONTENT(
-        comparative_report.report,
-        comparative_report.variant_inventory,
-        comparative_report.fasta_inventory,
-        comparative_report.rna_inventory,
-        comparative_report.external_comparison,
-        comparative_report.multiqc_summary,
-        progression_biology.report,
-        progression_biology.multiqc_summary,
-        progression_biology.enrichment,
-        progression_biology.pairwise_categories
-    )
+
 
     complete_reporter=file("${projectDir}/build_complete_report.py", checkIfExists:true)
     report_samplesheet=file(params.samplesheet, checkIfExists:true)
@@ -2522,7 +2528,20 @@ workflow {
         complete_reporter
     )
 
-    if (params.run_proteogenomic_validation) {
+    multiqc_report_builder=file("${projectDir}/build_pgtk_multiqc_content.py",checkIfExists:true)
+    comparative_multiqc=PREPARE_COMPARATIVE_MULTIQC_CONTENT(
+        file(params.samplesheet,checkIfExists:true), comparative_report.report,
+        comparative_report.variant_inventory, comparative_report.fasta_inventory,
+        comparative_report.rna_inventory, comparative_report.external_comparison,
+        comparative_report.multiqc_summary, progression_biology.report,
+        progression_biology.multiqc_summary, progression_biology.enrichment,
+        progression_biology.pairwise_categories, complete_findings.report,
+        complete_findings.failure_report, complete_findings.variant_explanations,
+        multiqc_report_builder, booleanText(params.run_proteogenomic_validation, '--run_proteogenomic_validation')
+    )
+
+    multiqc_config_file=file("${projectDir}/multiqc_config.yaml", checkIfExists:true)
+    if (strictBooleanParam(params.run_proteogenomic_validation, '--run_proteogenomic_validation')) {
         if (!new File(params.maxquant_txt.toString()).isDirectory()) error "MaxQuant folder not found: ${params.maxquant_txt}"
         mq_peptides = file("${params.maxquant_txt}/peptides.txt", checkIfExists:true)
         mq_evidence = file("${params.maxquant_txt}/evidence.txt", checkIfExists:true)
@@ -2567,32 +2586,26 @@ workflow {
         read_validation = VALIDATE_PROTEOGENOMIC_READS(evidence_report.variants, evidence_report.junctions, splice_validation.detailed, arriba_tables_for_validation, sorted_bams_for_validation, refs.gtf, refs.genome, read_validation_script)
         validation_semantics_doc = file("${projectDir}/PIPELINE_VALIDATION_SEMANTICS.md", checkIfExists:true)
         final_multiqc_content = PREPARE_FINAL_MULTIQC_CONTENT(
-            complete_findings.report,
-            complete_findings.failure_report,
-            complete_findings.variant_explanations,
-            variant_codon_validation.report,
-            variant_codon_validation.summary,
-            codon_mismatch_analysis.report,
-            codon_mismatch_analysis.summary,
-            integrated_variant_evidence.report,
-            variant_read_provenance.report,
-            variant_read_provenance.summary,
-            evidence_report.report,
+            comparative_report.variant_inventory,
+            comparative_report.rna_inventory,
+            progression_biology.multiqc_summary,
+            comparative_report.external_comparison,
+            expression_go.ora,
+            expression_go.ranked,
+            progression_variant_sets.enrichment,
             evidence_report.summary,
+            integrated_variant_evidence.report,
             evidence_report.classification_report,
-            evidence_report.failure_report,
-            read_validation.report,
             read_validation.summary,
-            validation_semantics_doc,
-            comparative_report.report,
-            comparative_report.multiqc_summary,
-            progression_biology.report,
-            progression_biology.multiqc_summary
+            variant_codon_validation.summary,
+            variant_read_provenance.summary,
+            file("${projectDir}/build_compact_multiqc_content.py", checkIfExists:true),
+            booleanText(params.run_proteogenomic_validation, '--run_proteogenomic_validation')
         )
-        final_multiqc_inputs = final_multiqc_content.content.mix(expression_multiqc_content).collect()
-        MULTIQC_FINAL(qc_files, final_multiqc_inputs)
+        final_multiqc_inputs = final_multiqc_content.content.mix(variant_landscape.multiqc).collect()
+        MULTIQC_FINAL(qc_files, final_multiqc_inputs, multiqc_config_file)
     } else {
-        final_multiqc_inputs = comparative_multiqc.mix(expression_multiqc_content).collect()
-        MULTIQC_FINAL(qc_files, final_multiqc_inputs)
+        final_multiqc_inputs = comparative_multiqc.mix(expression_multiqc_content, variant_landscape.multiqc).collect()
+        MULTIQC_FINAL(qc_files, final_multiqc_inputs, multiqc_config_file)
     }
 }

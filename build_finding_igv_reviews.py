@@ -149,8 +149,15 @@ def overlapping(index,chrom,start,end,pad=0):
     positions,values=data
     return values[bisect.bisect_left(positions,start-pad):bisect.bisect_right(positions,end+pad)]
 
+def browser_safe_display(read, ref='', alt=''):
+    has_deletion = any(operation == 2 for operation, count in (read.cigartuples or ()))
+    is_deletion_variant = bool(ref and alt and len(ref) > len(alt) and ref.startswith(alt))
+    return not has_deletion or is_deletion_variant
+
 def finalize_bam(source,target):
-    pysam.sort('-o',str(target),str(source));source.unlink(missing_ok=True);pysam.index(str(target))
+    pysam.sort('-o',str(target),str(source));source.unlink(missing_ok=True)
+    Path(str(target)+'.bai').unlink(missing_ok=True);target.with_suffix('.bai').unlink(missing_ok=True)
+    pysam.index(str(target))
     if pysam.quickcheck(str(target))!='':raise RuntimeError(f'HTSlib quickcheck failed: {target}')
 
 def main():
@@ -183,7 +190,10 @@ def main():
           if e.get('Chrom2'):rs.append((resolve_contig(bam,e['Chrom2']),max(1,int(e['Start2_0'])+1-a.padding),int(e['End2'])+a.padding))
           for c,s,z in rs:regions.append({'EventID':eid,'Sample':sample,'Chrom':c,'Start':s,'End':z})
           metadata[eid]=(e,chrom,target,ref,alt)
-          if ref and alt:variants.append((chrom,target,eid,e,start,end));bed.append(f'{chrom}\t{target-1}\t{target}\t{eid}\t1000\t.\t{target-1}\t{target}\t255,80,80')
+          if ref and alt:
+            variants.append((chrom,target,eid,e,start,end))
+            nonvars.append((chrom,start-1,end))
+            bed.append(f'{chrom}\t{target-1}\t{target}\t{eid}\t1000\t.\t{target-1}\t{target}\t255,80,80')
           else:
             for c,s,z in rs:nonvars.append((c,s-1,z));bed.append(f'{c}\t{s-1}\t{z}\t{eid} {e["Class"]}\t1000\t.\t{s-1}\t{z}\t80,120,255')
         vindex=make_index(variants,1);merged=merge_intervals(nonvars);mindex=make_index(merged,1)
@@ -193,7 +203,7 @@ def main():
             if read.is_unmapped or read.reference_id<0:continue
             scanned+=1;c=bam.get_reference_name(read.reference_id);start=read.reference_start+1;end=read.reference_end or start
             overlaps=overlapping(mindex,c,read.reference_start,read.reference_end or read.reference_start)
-            if any(x[1]<=read.reference_end and x[2]>=read.reference_start for x in overlaps):writers['event_display'].write(read);eventn+=1
+            if any(x[1]<=read.reference_end and x[2]>=read.reference_start for x in overlaps) and browser_safe_display(read):writers['event_display'].write(read);eventn+=1
             candidates=overlapping(vindex,c,start,end,2)
             if candidates:
               fields=read.to_string().split('\t');wa=wad=wr=False
@@ -206,8 +216,9 @@ def main():
                 if cls!='EXCLUDED' and nr<a.diagnostic_read_limit:rw.writerow(row);nr+=1
                 elif cls=='EXCLUDED' and ne<a.excluded_read_limit:ew.writerow(row);ne+=1
               if wa:writers['exact_alt_unique'].write(read);exactn+=1
-              if wad:writers['exact_alt_display'].write(read);altd+=1
-              if wr:writers['reference_display'].write(read);refd+=1
+              display_ref,display_alt=parse_label(candidates[0][3].get('Label','')) if candidates else ('','')
+              if wad and browser_safe_display(read,display_ref,display_alt):writers['exact_alt_display'].write(read);altd+=1
+              if wr and browser_safe_display(read,display_ref,display_alt):writers['reference_display'].write(read);refd+=1
             if a.progress_every_reads and scanned%a.progress_every_reads==0:print(f'PROGRESS sample={sample} reads={scanned} event={eventn} exact_alt={exactn}',flush=True)
         finally:
           for w in writers.values():w.close()

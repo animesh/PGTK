@@ -2,7 +2,7 @@
 import re,subprocess,tempfile
 from pathlib import Path
 main=Path('main.nf').read_text();config=Path('nextflow.config').read_text();review=Path('build_finding_igv_reviews.py').read_text();explorer=Path('build_finding_explorer.py').read_text()
-processes=re.findall(r'^process\s+(\w+)\s*\{',main,re.M);assert len(processes)==72 and len(set(processes))==72
+processes=re.findall(r'^process\s+(\w+)\s*\{',main,re.M);assert len(processes)==73 and len(set(processes))==73
 assert 'process BUILD_FINDING_EXPLORER {' in main and 'GENERATE_PRIORITY_IGV_REPORTS' not in main
 assert '--priority-limit 0' in main and 'params.igv_report_limit' not in main and 'timeout 600' not in main
 assert 'withName: BUILD_FINDING_EXPLORER {' in config
@@ -16,4 +16,4 @@ body=body.replace('\\$','$')
 with tempfile.NamedTemporaryFile('w',suffix='.sh') as h:
  h.write(body);h.flush();subprocess.run(['bash','-n',h.name],check=True)
 assert '""' not in body.splitlines()[-2]
-print('PASS: 72 processes, exact rendered explorer shell syntax, database-free explorer, zero finding limit')
+print('PASS: 73 processes, exact rendered explorer shell syntax, database-free explorer, zero finding limit')

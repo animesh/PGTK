@@ -47,6 +47,7 @@ def main():
         root / "validate_runtime_inputs.py",
         root / "validate_haplotype_shards.py",
         root / "summarize_variant_stages.py",
+        root / "analyze_variant_landscape.py",
         root / "compare_external_vcf.py",
         root / "build_comparative_advantage_report.py",
         root / "build_igv_evidence_bundle.py",
