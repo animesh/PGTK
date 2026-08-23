@@ -7,6 +7,7 @@ consolidated event/read tables, compact IGV-ready BAMs, BED/BEDPE markers, and
 an evidence report. No analyst-defined acceptance threshold is applied.
 """
 import argparse, csv, gzip, json, re, subprocess, sys
+import pysam
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -52,7 +53,7 @@ def classify(ref,alt):
 
 
 def contigs(bam):
-    return {x.split("\t",1)[0] for x in run(["samtools","idxstats",str(bam)],True).splitlines() if x and not x.startswith("*")}
+    return {x.split("\t",1)[0] for x in pysam.idxstats(str(bam)).splitlines() if x and not x.startswith("*")}
 
 
 def match_contig(chrom, available):
@@ -128,7 +129,8 @@ def main():
     ap.add_argument("--output-prefix",default="proteogenomic_read_validation")
     ap.add_argument("--padding",type=int,default=150)
     args=ap.parse_args()
-    run(["samtools","--version"],True)
+    if not getattr(pysam, "__samtools_version__", ""):
+        raise SystemExit("pysam does not expose an HTSlib/samtools runtime")
     prefix=Path(args.output_prefix); outdir=prefix.parent; outdir.mkdir(parents=True,exist_ok=True)
     variants=read_tsv(args.variants); junctions=read_tsv(args.junctions)
     selected=[r for r in variants if r.get("Altered-residue peptides")]
@@ -145,7 +147,7 @@ def main():
             contig=match_contig(chrom,available[sample])
             if not contig: continue
             end=pos+max(len(ref),1)-1; region=f"{contig}:{max(1,pos-args.padding)}-{end+args.padding}"
-            text=run(["samtools","view",str(bam),region],True)
+            text=pysam.view(str(bam), region)
             counts=Counter(); mapqs=[]; bqs=[]; strands=Counter(); mates=Counter(); names=[]
             for line in text.splitlines():
                 f=line.split("\t");
@@ -178,8 +180,8 @@ def main():
     bam_outputs=[]
     for sample,bam in sorted(bam_map.items()):
         ob=Path(f"{prefix}.{sample}.bam")
-        run(["samtools","view","-bh","-L",str(region_bed),"-o",str(ob),str(bam)])
-        run(["samtools","index",str(ob)]); bam_outputs.append(ob)
+        pysam.view("-bh", "-L", str(region_bed), "-o", str(ob), str(bam), catch_stdout=False)
+        pysam.index(str(ob)); bam_outputs.append(ob)
 
     # fusion BEDPE and consolidated Arriba table
     fusion_rows=[]
