@@ -202,14 +202,12 @@ process DOWNLOAD_REFERENCES {
     path genome_archive
     path gtf_archive
     path cdna_archive
-    path proteome_archive
     path vep_archive
     path arriba_archive
     output:
     path 'refs/genome.fa', emit: genome
     path 'refs/genes.gtf', emit: gtf
     path 'refs/cdna.fa', emit: cdna
-    path 'refs/human_reviewed_isoforms.fasta', emit: proteome
     path 'refs/vep_cache', emit: vep_cache
     path 'refs/arriba_blacklist.tsv.gz', emit: blacklist
     path 'refs/arriba_known_fusions.tsv.gz', emit: known
@@ -223,7 +221,6 @@ process DOWNLOAD_REFERENCES {
     gzip -dc ${genome_archive} > refs/genome.fa
     gzip -dc ${gtf_archive} > refs/genes.gtf
     gzip -dc ${cdna_archive} > refs/cdna.fa
-    gzip -dc ${proteome_archive} > refs/human_reviewed_isoforms.fasta
 
     tar -xzf ${vep_archive} -C refs/vep_cache
     tar -xzf ${arriba_archive} -C refs/arriba_unpack
@@ -235,7 +232,6 @@ process DOWNLOAD_REFERENCES {
     test -s refs/genome.fa
     test -s refs/genes.gtf
     test -s refs/cdna.fa
-    test -s refs/human_reviewed_isoforms.fasta
     test -d refs/vep_cache/homo_sapiens/111_GRCh38
     test -s refs/arriba_blacklist.tsv.gz
     test -s refs/arriba_known_fusions.tsv.gz
@@ -2238,7 +2234,6 @@ workflow {
     if (!params.reference_downloads) error '--reference_downloads is required'
     if (!params.container_cache) error '--container_cache is required'
     if (!params.pysam_image) error '--pysam_image is required'
-    if (!params.ensembl_pep) error '--ensembl_pep is required'
     if (!(params.finding_priority_mode in ['all','filter'])) error '--finding_priority_mode must be all or filter'
     if ((params.igv_report_timeout_seconds as int) <= 0) error '--igv_report_timeout_seconds must be a positive integer'
     if ((params.igv_report_max_reads as int) <= 0) error '--igv_report_max_reads must be positive'
@@ -2260,14 +2255,12 @@ workflow {
     reference_genome_archive = file("${params.reference_downloads}/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz", checkIfExists:true)
     reference_gtf_archive = file("${params.reference_downloads}/Homo_sapiens.GRCh38.111.gtf.gz", checkIfExists:true)
     reference_cdna_archive = file("${params.reference_downloads}/Homo_sapiens.GRCh38.cdna.all.fa.gz", checkIfExists:true)
-    reference_proteome_archive = file("${params.reference_downloads}/human_reviewed_isoforms.fasta.gz", checkIfExists:true)
     reference_vep_archive = file("${params.reference_downloads}/homo_sapiens_vep_111_GRCh38.tar.gz", checkIfExists:true)
     reference_arriba_archive = file("${params.reference_downloads}/arriba_v2.4.0.tar.gz", checkIfExists:true)
     refs=DOWNLOAD_REFERENCES(
         reference_genome_archive,
         reference_gtf_archive,
         reference_cdna_archive,
-        reference_proteome_archive,
         reference_vep_archive,
         reference_arriba_archive
     )
@@ -2542,6 +2535,7 @@ workflow {
 
     multiqc_config_file=file("${projectDir}/multiqc_config.yaml", checkIfExists:true)
     if (strictBooleanParam(params.run_proteogenomic_validation, '--run_proteogenomic_validation')) {
+        if (!params.ensembl_pep) error '--ensembl_pep is required when --run_proteogenomic_validation true'
         if (!new File(params.maxquant_txt.toString()).isDirectory()) error "MaxQuant folder not found: ${params.maxquant_txt}"
         mq_peptides = file("${params.maxquant_txt}/peptides.txt", checkIfExists:true)
         mq_evidence = file("${params.maxquant_txt}/evidence.txt", checkIfExists:true)

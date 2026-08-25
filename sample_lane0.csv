@@ -1,4 +1,0 @@
-patient,sample,fastq_1,fastq_2,lane
-TK14,SRR31089072,/mnt/z/Download/TK/fastq/SRR31089072_1.fastq.gz,/mnt/z/Download/TK/fastq/SRR31089072_2.fastq.gz,lane0
-TK13,SRR31089073,/mnt/z/Download/TK/fastq/SRR31089073_1.fastq.gz,/mnt/z/Download/TK/fastq/SRR31089073_2.fastq.gz,lane0
-TK12,SRR31089074,/mnt/z/Download/TK/fastq/SRR31089074_1.fastq.gz,/mnt/z/Download/TK/fastq/SRR31089074_2.fastq.gz,lane0

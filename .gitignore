@@ -292,3 +292,6 @@ work/
 work/
 #  you could uncomment the following to ignore the entire vscode folder
 *.zip
+
+# Required production source manifest
+!pipeline_required_files.txt

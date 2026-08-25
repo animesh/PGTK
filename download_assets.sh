@@ -25,7 +25,7 @@ mkdir -p \
     "$REFERENCE_DIR" \
     "$TMP_DIR"
 
-command -v singularity >/dev/null
+command -v apptainer >/dev/null
 command -v curl >/dev/null
 command -v gzip >/dev/null
 command -v tar >/dev/null
@@ -40,7 +40,7 @@ pull_image() {
     local temporary="$output.tmp"
     local log_file="$TMP_DIR/${name}.pull.log"
 
-    if [[ -s "$output" ]] && singularity inspect "$output" >/dev/null 2>&1; then
+    if [[ -s "$output" ]] && apptainer inspect "$output" >/dev/null 2>&1; then
         echo "Using validated image: $output"
         return 0
     fi
@@ -52,8 +52,8 @@ pull_image() {
         rm -f "$temporary"
         : > "$log_file"
 
-        if singularity --quiet pull --force "$temporary" "$uri" >"$log_file" 2>&1 && \
-           singularity inspect "$temporary" >/dev/null 2>&1; then
+        if apptainer --quiet pull --force "$temporary" "$uri" >"$log_file" 2>&1 && \
+           apptainer inspect "$temporary" >/dev/null 2>&1; then
             mv "$temporary" "$output"
             rm -f "$log_file"
             echo "Validated image: $output"
@@ -145,7 +145,7 @@ pull_biocontainer_stable() {
     local source_file="$CONTAINER_DIR/${stable_name}.source.txt"
     local resolved_tag
 
-    if [[ -s "$output" ]] && singularity inspect "$output" >/dev/null 2>&1; then
+    if [[ -s "$output" ]] && apptainer inspect "$output" >/dev/null 2>&1; then
         echo "Using validated image: $output"
         return 0
     fi
@@ -160,7 +160,7 @@ validate_image_command() {
     local image="$1"
     shift
 
-    if ! singularity exec "$image" "$@" >/dev/null 2>&1; then
+    if ! apptainer exec "$image" "$@" >/dev/null 2>&1; then
         echo "ERROR: required command failed inside image: $image :: $*" >&2
         return 1
     fi
@@ -402,14 +402,6 @@ download_asset \
     validate_tar_gzip \
     true
 
-# UniProt streaming responses do not support HTTP range requests.
-download_asset \
-    'https://rest.uniprot.org/uniprotkb/stream?compressed=true&format=fasta&includeIsoform=true&query=%28proteome%3AUP000005640%29+AND+%28reviewed%3Atrue%29' \
-    "$REFERENCE_DIR/human_reviewed_isoforms.fasta.gz" \
-    'UniProt proteome' \
-    validate_gzip \
-    false
-
 download_asset \
     'https://github.com/suhrig/arriba/releases/download/v2.4.0/arriba_v2.4.0.tar.gz' \
     "$REFERENCE_DIR/arriba_v2.4.0.tar.gz" \
@@ -439,7 +431,6 @@ sha256sum \
     "$REFERENCE_DIR/Homo_sapiens.GRCh38.cdna.all.fa.gz" \
     "$REFERENCE_DIR/Homo_sapiens.GRCh38.pep.all.fa.gz" \
     "$REFERENCE_DIR/homo_sapiens_vep_111_GRCh38.tar.gz" \
-    "$REFERENCE_DIR/human_reviewed_isoforms.fasta.gz" \
     "$REFERENCE_DIR/arriba_v2.4.0.tar.gz" \
     "$REFERENCE_DIR/go-basic.obo" \
     "$REFERENCE_DIR/goa_human.gaf.gz" \
@@ -450,6 +441,6 @@ find "$CONTAINER_DIR" -maxdepth 1 -type f -name '*.img' -print0 \
     | xargs -0 sha256sum \
     > "$CONTAINER_DIR/downloaded_containers.sha256"
 
-printf 'All 17 containers and all 9 reference assets are valid.\n'
+printf 'All 18 containers and all 8 reference assets are valid.\n'
 printf 'Reference checksums: %s\n' "$REFERENCE_DIR/downloaded_assets.sha256"
 printf 'Container checksums: %s\n' "$CONTAINER_DIR/downloaded_containers.sha256"

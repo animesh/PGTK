@@ -2,6 +2,14 @@
 
 set -euo pipefail
 
+# Proxy variables are optional. Define them as empty when the login-node
+# environment does not provide a proxy so strict unset-variable checking is safe.
+: "${http_proxy:=}"
+: "${https_proxy:=}"
+: "${HTTP_PROXY:=$http_proxy}"
+: "${HTTPS_PROXY:=$https_proxy}"
+export http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+
 WORKDIR="${1:-$(pwd -P)}"
 SAMPLESHEET="$WORKDIR/samples.csv"
 SRA_DIR="$WORKDIR/sra_cache"
@@ -30,8 +38,8 @@ test -s "$SRA_IMAGE" || {
     exit 1
 }
 
-command -v singularity >/dev/null
-singularity inspect "$SRA_IMAGE" >/dev/null
+command -v apptainer >/dev/null
+apptainer inspect "$SRA_IMAGE" >/dev/null
 
 mapfile -t SRRS < <(
     awk -F, 'NR > 1 {gsub(/\r/, "", $2); if ($2 != "") print $2}' "$SAMPLESHEET" |
@@ -67,7 +75,7 @@ for srr in "${SRRS[@]}"; do
         rm -rf "$attempt_dir"
         mkdir -p "$attempt_dir"
 
-        if singularity exec \
+        if apptainer exec \
             --bind "$WORKDIR:$WORKDIR" \
             --pwd "$WORKDIR" \
             --env "http_proxy=$http_proxy" \
@@ -93,7 +101,7 @@ for srr in "${SRRS[@]}"; do
         sleep 30
     done
 
-    if ! singularity exec \
+    if ! apptainer exec \
         --bind "$WORKDIR:$WORKDIR" \
         --pwd "$WORKDIR" \
         "$SRA_IMAGE" \
