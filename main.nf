@@ -1750,6 +1750,11 @@ process PREPARE_COMPARATIVE_MULTIQC_CONTENT {
     path progression_summary
     path progression_enrichment
     path progression_pairwise_categories
+    path variant_landscape_summary
+    path variant_landscape_genes
+    path progression_pairwise_alleles
+    path progression_pairwise_genes
+    path progression_candidates
     path complete_report
     path rna_failure_report
     path rna_variant_explanations
@@ -1759,12 +1764,13 @@ process PREPARE_COMPARATIVE_MULTIQC_CONTENT {
     script:
     """
     set -euo pipefail
-    python3 ${report_builder} --output-dir comparative_multiqc_content --samples ${samplesheet} --variant-inventory ${variant_inventory} --fasta-inventory ${fasta_inventory} --rna-inventory ${rna_inventory} --external-comparison ${external_comparison} --summary ${summary} --progression-summary ${progression_summary} --progression-enrichment ${progression_enrichment} --progression-pairwise ${progression_pairwise_categories} --complete-report ${complete_report} --rna-failure-report ${rna_failure_report} --rna-variant-explanations ${rna_variant_explanations} --comparative-report ${report} --progression-report ${progression_report} --maxquant-enabled ${maxquant_enabled}
+    python3 ${report_builder} --output-dir comparative_multiqc_content --samples ${samplesheet} --variant-inventory ${variant_inventory} --fasta-inventory ${fasta_inventory} --rna-inventory ${rna_inventory} --external-comparison ${external_comparison} --summary ${summary} --progression-summary ${progression_summary} --progression-enrichment ${progression_enrichment} --progression-pairwise ${progression_pairwise_categories} --variant-landscape-summary ${variant_landscape_summary} --variant-landscape-genes ${variant_landscape_genes} --pairwise-alleles ${progression_pairwise_alleles} --pairwise-genes ${progression_pairwise_genes} --candidate-priority ${progression_candidates} --complete-report ${complete_report} --rna-failure-report ${rna_failure_report} --rna-variant-explanations ${rna_variant_explanations} --comparative-report ${report} --progression-report ${progression_report} --maxquant-enabled ${maxquant_enabled}
     """
 }
 
 process MULTIQC_QC_DATA {
     tag 'qc_data_pass'
+    publishDir "${params.outdir}/qc", mode:'copy'
     cpus 4; memory '16 GB'; time '12h'; disk '150 GB'
     container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
     input: path qc_files
@@ -2202,9 +2208,33 @@ process PREPARE_FINAL_MULTIQC_CONTENT {
     """
 }
 
+process PREPARE_RESULTS_CATALOGUE {
+    tag 'published_results_catalogue'
+    cpus 1; memory '2 GB'; time '1h'; disk '5 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    input:
+    val ready
+    path catalogue_builder
+    val results_dir
+    val external_enabled
+    val maxquant_enabled
+    output:
+    path 'results_catalogue_content', emit: content
+    script:
+    """
+    set -euo pipefail
+    python3 ${catalogue_builder} \
+      --results-dir '${results_dir}' \
+      --output-dir results_catalogue_content \
+      --external-enabled ${external_enabled} \
+      --maxquant-enabled ${maxquant_enabled}
+    test -s results_catalogue_content/pgtk_results_catalogue_mqc.html
+    """
+}
+
 process MULTIQC_FINAL {
     tag 'integrated_final_report'
-    cpus 4; memory '16 GB'; time '12h'; disk '150 GB'
+    cpus 2; memory '8 GB'; time '4h'; disk '30 GB'
     container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
     publishDir "${params.outdir}/multiqc", mode:'copy'
     input:
@@ -2217,15 +2247,17 @@ process MULTIQC_FINAL {
     script:
     """
     set -euo pipefail
-    multiqc . \\
-        --force \\
-        --title 'PGTK complete RNA-seq and proteogenomics report' \\
-        --filename multiqc_report.html \\
-        --config ${multiqc_config} \\
-        --data-dir \\
+    multiqc . \
+        --force \
+        --module custom_content \
+        --title 'PGTK results dashboard' \
+        --filename multiqc_report.html \
+        --config ${multiqc_config} \
+        --data-dir \
         --data-format tsv
     rm -f multiqc_report_data/llms-full.txt
-    test "\$(stat -c %s multiqc_report.html)" -le 25000000 || { echo "ERROR: final MultiQC HTML exceeds 25 MB" >&2; exit 1; }
+    test "\$(stat -c %s multiqc_report.html)" -le 8000000 || { echo "ERROR: lightweight final MultiQC HTML exceeds 8 MB" >&2; exit 1; }
+    ! grep -Eq 'id="[0-9]{2}_core_report"|Rejected or discarded initial findings:|00 Pgtk|30 Expression' multiqc_report.html || { echo "ERROR: legacy or numbered sections detected in final MultiQC HTML" >&2; exit 1; }
     """
 }
 
@@ -2474,10 +2506,12 @@ workflow {
         refs.genome,
         finding_review_script
     )
+    catalogue_explorer_ready = finding_reviews.reviews
     if (strictBooleanParam(params.generate_priority_igv_reports, '--generate_priority_igv_reports')) {
         finding_explorer_script=file("${projectDir}/build_finding_explorer.py",checkIfExists:true)
         finding_explorer_launcher=file("${projectDir}/serve_finding_explorer.sh",checkIfExists:true)
         finding_explorer=BUILD_FINDING_EXPLORER(finding_reviews.reviews, refs.genome, finding_explorer_script, finding_explorer_launcher)
+        catalogue_explorer_ready = finding_explorer.explorer
     }
     comparative_report_script=file("${projectDir}/build_comparative_advantage_report.py", checkIfExists:true)
     comparative_report=BUILD_COMPARATIVE_ADVANTAGE_REPORT(
@@ -2528,7 +2562,10 @@ workflow {
         comparative_report.rna_inventory, comparative_report.external_comparison,
         comparative_report.multiqc_summary, progression_biology.report,
         progression_biology.multiqc_summary, progression_biology.enrichment,
-        progression_biology.pairwise_categories, complete_findings.report,
+        progression_biology.pairwise_categories, variant_landscape.summary,
+        variant_landscape.genes, progression_biology.pairwise_alleles,
+        progression_biology.pairwise_genes, progression_biology.candidates,
+        complete_findings.report,
         complete_findings.failure_report, complete_findings.variant_explanations,
         multiqc_report_builder, booleanText(params.run_proteogenomic_validation, '--run_proteogenomic_validation')
     )
@@ -2596,10 +2633,27 @@ workflow {
             file("${projectDir}/build_compact_multiqc_content.py", checkIfExists:true),
             booleanText(params.run_proteogenomic_validation, '--run_proteogenomic_validation')
         )
-        final_multiqc_inputs = final_multiqc_content.content.mix(variant_landscape.multiqc).collect()
-        MULTIQC_FINAL(qc_files, final_multiqc_inputs, multiqc_config_file)
+        dashboard_content = final_multiqc_content.content.mix(comparative_multiqc, expression_multiqc_content)
+        catalogue_ready = evidence_report.report
+            .combine(catalogue_explorer_ready)
+            .combine(multiqc_result.report)
+            .map { 'ready' }
     } else {
-        final_multiqc_inputs = comparative_multiqc.mix(expression_multiqc_content, variant_landscape.multiqc).collect()
-        MULTIQC_FINAL(qc_files, final_multiqc_inputs, multiqc_config_file)
+        dashboard_content = comparative_multiqc.mix(expression_multiqc_content)
+        catalogue_ready = comparative_multiqc
+            .combine(expression_multiqc_content)
+            .combine(catalogue_explorer_ready)
+            .combine(multiqc_result.report)
+            .map { 'ready' }
     }
+    catalogue_builder = file("${projectDir}/build_results_catalogue.py", checkIfExists:true)
+    results_catalogue = PREPARE_RESULTS_CATALOGUE(
+        catalogue_ready,
+        catalogue_builder,
+        params.outdir.toString(),
+        booleanText(params.run_external_vcf_comparison, '--run_external_vcf_comparison'),
+        booleanText(params.run_proteogenomic_validation, '--run_proteogenomic_validation')
+    )
+    final_multiqc_inputs = dashboard_content.mix(results_catalogue.content).collect()
+    MULTIQC_FINAL(qc_files, final_multiqc_inputs, multiqc_config_file)
 }

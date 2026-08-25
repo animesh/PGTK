@@ -28,8 +28,8 @@ def html_table(rows):
     return f'<table class="table table-sm"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
 def main():
     p=argparse.ArgumentParser(); p.add_argument('--output-dir',required=True); p.add_argument('--expression-ora',required=True); p.add_argument('--ranked-go',required=True); p.add_argument('--expression-summary',required=True); p.add_argument('--variant-set-go',required=True); p.add_argument('--variant-set-summary',required=True); a=p.parse_args(); out=Path(a.output_dir); out.mkdir(parents=True,exist_ok=True)
-    overview='<h2>Expression and Gene Ontology</h2><p>Complete source tables remain under <a href="../expression/go/">expression/go</a> and <a href="../progression_biology/sets/">progression_biology/sets</a>.</p>'+html_table(read_rows(a.expression_summary))+html_table(read_rows(a.variant_set_summary))
-    (out/'30_expression_go_overview_mqc.html').write_text(overview,encoding='utf-8')
+    overview='---\nid: pgtk_expression_go_overview\nsection_name: Expression and GO overview\n---\n<h2>Expression and Gene Ontology</h2><p>Complete source tables remain under <a href="../expression/go/">expression/go</a> and <a href="../progression_biology/sets/">progression_biology/sets</a>.</p>'+html_table(read_rows(a.expression_summary))+html_table(read_rows(a.variant_set_summary))
+    (out/'pgtk_expression_go_overview_mqc.html').write_text(overview,encoding='utf-8')
     for ident,title,path in [('pgtk_expression_ora_top','Expression GO over-representation',a.expression_ora),('pgtk_expression_ranked_go_top','Ranked expression GO',a.ranked_go),('pgtk_progression_variant_set_go_top','Progression variant-set GO',a.variant_set_go)]:
         rows=top_terms(read_rows(path)); data={}
         for index,row in enumerate(rows,1):

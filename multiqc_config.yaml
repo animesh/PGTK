@@ -1,23 +1,12 @@
-title: "PGTK RNA-seq and proteogenomics dashboard"
-subtitle: "QC, RNA evidence, progression, GO, Sarek and MaxQuant"
+title: "PGTK results dashboard"
+subtitle: "RNA evidence, progression, expression, GO and optional validation"
 report_comment: "RNA-observed events are exploratory evidence and are not DNA-confirmed somatic mutations."
 show_analysis_paths: false
 show_analysis_time: true
 export_plots: false
 make_data_dir: true
-skip_generalstats: false
-max_table_rows: 50
-plots_force_interactive: true
-extra_fn_clean_exts:
-  - ".pass"
-  - ".filtered"
-  - ".normalized"
-  - ".rna.validated"
+skip_generalstats: true
+max_table_rows: 30
+plots_force_interactive: false
 module_order:
   - custom_content
-  - fastqc
-  - cutadapt
-  - star
-  - samtools
-  - picard
-  - bcftools

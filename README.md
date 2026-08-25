@@ -21,7 +21,7 @@ Container runtime: Apptainer
 Reference assembly: GRCh38
 Ensembl release: 111
 VEP cache: release 111, GRCh38
-Pipeline processes declared: 73
+Pipeline processes declared: 74
 Validated containers: 18
 Required downloaded reference assets: 8
 ```
@@ -36,12 +36,12 @@ The authoritative source manifest is `pipeline_required_files.txt`. Source valid
 
 | File | Purpose |
 |---|---|
-| `main.nf` | Complete 73-process Nextflow DSL2 workflow, channel construction, process definitions, optional branch wiring, parameter validation, output publication, and final report assembly. |
+| `main.nf` | Complete 74-process Nextflow DSL2 workflow, channel construction, process definitions, optional branch wiring, parameter validation, output publication, and final report assembly. |
 | `nextflow.config` | Slurm executor configuration, robust retry behavior, queue routing, resource escalation, task-specific CPU, memory, and time directives, trace, report, timeline, and DAG settings. |
 | `scratch.slurm` | Production Slurm wrapper. Resolves paths and environment variables, creates runtime directories, loads Java when configured, runs source and runtime preflight validation, launches Nextflow with Apptainer and `-resume`, writes execution reports, and runs post-execution failure and resource analysis. |
 | `run.sh` | Lightweight direct Nextflow launcher for environments where the full Slurm wrapper is not required. Production Saga runs should use `scratch.slurm`. |
 | `samples.csv` | Input samplesheet containing sample, SRA accession, subject identifier, group metadata, and baseline designation. |
-| `multiqc_config.yaml` | MultiQC title, module order, filename cleanup, table limits, and report interpretation text. |
+| `multiqc_config.yaml` | Configures the lightweight custom-content results dashboard, disables General Statistics in that dashboard, preserves interactive plots, and keeps the detailed technical QC report separate under `results/qc/`. |
 | `PIPELINE_VALIDATION_SEMANTICS.md` | Definitions for codon validation, partial evidence, validation failure, strict integrated evidence, and resource-profile semantics. |
 | `pipeline_required_files.txt` | Exact manifest of files required in the minimal production source tree. |
 | `.gitattributes` | Git attribute rules for repository files. |
@@ -54,7 +54,7 @@ The authoritative source manifest is `pipeline_required_files.txt`. Source valid
 |---|---|
 | `download_assets.sh` | Creates asset directories, downloads 18 pinned Apptainer images and eight required reference assets, validates archives and images, and writes SHA-256 manifests. It does not download UniProt because the core pipeline does not consume it. |
 | `download_sra.sh` | Reads SRA accessions from `samples.csv`, creates `sra_cache`, downloads each archive on a login node using the pinned SRA Tools image, and validates every archive using `vdb-validate`. |
-| `validate_pipeline_commands.sh` | Source preflight. Checks the manifest, Python and shell syntax, 73 unique process declarations, required wiring, Apptainer use, Pysam contracts, and `nextflow inspect`. |
+| `validate_pipeline_commands.sh` | Source preflight. Checks the manifest, Python and shell syntax, 74 unique process declarations, required wiring, Apptainer use, Pysam contracts, and `nextflow inspect`. |
 | `validate_runtime_inputs.py` | Exact runtime preflight. Checks directories, executables, eight references, 18 images and tools, Python scripts inside their target images, all SRA archives, optional Sarek and MaxQuant inputs, and Nextflow inspection. |
 | `collect_pipeline_failures.py` | Builds a per-run failure ledger and cumulative failure history from the trace, Nextflow log, wrapper log, task attempts, and final exit code. |
 | `analyze_pipeline_trace.py` | Summarizes task runtime, CPU, memory, resource efficiency, retries, and warning conditions from the Nextflow trace. |
@@ -104,9 +104,10 @@ The authoritative source manifest is `pipeline_required_files.txt`. Source valid
 | `build_finding_igv_reviews.py` | Consolidates findings, selects event regions, classifies reads, builds event evidence BAMs, and prepares strict finding review manifests. |
 | `build_finding_explorer.py` | Creates the portable database-free HTML finding explorer and its data assets. |
 | `serve_finding_explorer.sh` | Serves the generated explorer over a local HTTP port, suitable for SSH port forwarding. |
-| `build_compact_multiqc_content.py` | Converts core pipeline findings into compact MultiQC custom-content sections. |
-| `build_expression_multiqc_content.py` | Converts expression and GO summaries into MultiQC custom content. |
-| `build_pgtk_multiqc_content.py` | Produces integrated PGTK-specific MultiQC content and summary tables. |
+| `build_compact_multiqc_content.py` | Builds compact optional-branch MultiQC sections, including external-caller concordance and MaxQuant, read-level, codon, and provenance evidence when those branches are enabled. Disabled optional branches do not create placeholder sections. |
+| `build_expression_multiqc_content.py` | Builds expression and GO overview tables plus top expression ORA, ranked-expression GO, and progression variant-set GO sections without numbered or empty placeholder tabs. |
+| `build_pgtk_multiqc_content.py` | Builds the main biological dashboard sections, including variant stages, variant types, genotypes, substitution classes, VEP impacts and consequences, progression overlap, chromosome distribution, shared progression genes, HIGH-impact candidates, priority candidates, GO summaries, and report navigation. |
+| `build_results_catalogue.py` | Scans the completed published `results/` tree and creates a Results catalogue plus documented result-family sections. Each section explains producing steps, inputs, key thresholds, and direct links to the files that were generated. Sarek and MaxQuant sections appear only when enabled. |
 | `build_complete_report.py` | Builds the complete findings report across variants, fusions, splice events, progression, expression, GO, and validation evidence. |
 | `build_comparative_advantage_report.py` | Builds the comparative biological-advantage report, including branch availability and evidence interpretation. |
 | `external_comparison.none.tsv` | Empty, schema-valid sentinel used when external Sarek comparison is disabled. |
@@ -226,7 +227,12 @@ flowchart TD
     L4 --> Z4[PREPARE_EXPRESSION_MULTIQC_CONTENT]
     D1 --> Z5[MULTIQC_QC_DATA]
     D3 --> Z5
-    Z3 --> Z6[MULTIQC_FINAL]
+    Z3 --> Z7[PREPARE_RESULTS_CATALOGUE]
+    Z4 --> Z7
+    Z5 --> Z7
+    N3 --> Z7
+    Z7 --> Z6[MULTIQC_FINAL]
+    Z3 --> Z6
     Z4 --> Z6
     Z5 --> Z6
 ```
@@ -239,19 +245,34 @@ flowchart TD
 cd /cluster/projects/nn9036k/scrbkup/PGTK-minimal-audited
 ```
 
-Confirm the exact source set:
+Confirm that the manifest contains exactly 50 unique entries and that every listed source file exists and is non-empty:
 
 ```bash
-find . -maxdepth 1 -type f -printf '%f\n' | sort | wc -l
+awk 'NF { count++; seen[$0]++ } END {
+  printf "Manifest entries: %d\n", count
+  for (file in seen) {
+    if (seen[file] > 1) {
+      printf "DUPLICATE: %s (%d entries)\n", file, seen[file]
+      failed = 1
+    }
+  }
+  exit failed
+}' pipeline_required_files.txt
 
-comm -3 \
-  <(sort pipeline_required_files.txt) \
-  <(find . -maxdepth 1 -type f \
-      ! -name pipeline_required_files.txt \
-      -printf '%f\n' | sort)
+test "$(awk 'NF { count++ } END { print count }' pipeline_required_files.txt)" -eq 50
+
+test "$(grep -Fxc 'build_results_catalogue.py' pipeline_required_files.txt)" -eq 1
+
+while IFS= read -r file; do
+  [[ -z "$file" ]] && continue
+  test -s "$file" || {
+    printf 'MISSING OR EMPTY: %s\n' "$file" >&2
+    exit 1
+  }
+done < pipeline_required_files.txt
 ```
 
-Expected file count: `50`. The `comm` command must produce no output.
+Do not compare the manifest against every top-level file in the working directory. Production runs intentionally create logs, validation reports, job-ID files, caches, and downloaded archives that are not source-manifest entries.
 
 ### 2. Configure the samplesheet
 
@@ -527,15 +548,17 @@ A successful run prints only the header.
 ### 10. Principal outputs
 
 ```text
-results/multiqc/multiqc_report.html
+results/multiqc/multiqc_report.html          # interactive biological dashboard and documented Results catalogue
+results/multiqc/multiqc_report_data/         # MultiQC custom-content data
+results/qc/multiqc_report.html               # detailed FastQC/Trim Galore/STAR/Samtools/Picard/Bcftools report
 results/combined_fasta/<sample>.exploratory_proteogenomics.fasta
 results/progression_vcf/
 results/progression_biology/
 results/expression/
 results/variant_landscape/
 results/igv/
-results/complete_findings/
-results/comparative_report/
+results/reports/
+results/comparative_advantage/
 results/pipeline_trace-<job_id>.tsv
 results/pipeline_report-<job_id>.html
 results/pipeline_timeline-<job_id>.html
@@ -543,6 +566,33 @@ results/pipeline_dag-<job_id>.html
 results/resource_usage-<job_id>.*
 results/failure_logs/
 ```
+
+## Results dashboard and catalogue
+
+The final biological dashboard is:
+
+```text
+results/multiqc/multiqc_report.html
+```
+
+The dashboard is generated with the MultiQC `custom_content` module only. Detailed technical sequencing QC is kept separately in `results/qc/multiqc_report.html`.
+
+The dashboard includes interactive summaries for variant processing and progression, including:
+
+- variant counts across raw, normalized, hard-filtered, PASS, VEP, RNA-validated, baseline-only, progression-only, and shared-with-baseline stages;
+- SNV, MNV, insertion, deletion, complex-allele, genotype, transition/transversion, VEP impact, and consequence distributions;
+- progression overlap, shared and sample-exclusive progression alleles, chromosome distribution, shared progression genes, HIGH-impact candidates, and priority candidates;
+- expression GO, ranked-expression GO, progression GO, and progression variant-set GO;
+- optional external-caller and MaxQuant evidence only when those branches are enabled.
+
+`PREPARE_RESULTS_CATALOGUE` runs after the required published outputs are available. `build_results_catalogue.py` scans the completed `results/` directory and adds documented result-family sections with:
+
+- how each result family was produced;
+- the inputs used;
+- key thresholds and settings;
+- direct relative links to every published file in that family.
+
+The catalogue covers sequencing QC, alignments and expression, raw and filtered variants, VEP and RNA validation, variant landscape and GO, progression comparisons, fusions and splicing, custom FASTAs, IGV evidence, integrated reports, execution records, and failure ledgers. Disabled Sarek and MaxQuant branches are omitted rather than shown as empty placeholders.
 
 ## Optional Sarek comparison
 
@@ -598,11 +648,22 @@ export PGTK_IGV_REPORTS_IMAGE="$CONTAINER_CACHE/quay.io-biocontainers-igv-report
 ./serve_explorer.sh "$PWD" 8765
 ```
 
+Keep the Saga server terminal open. From the local computer, create an SSH tunnel to the same Saga login node on which the server is running. For example, if the server runs on `login-2`:
+
+```bash
+ssh -N -L 8765:127.0.0.1:8765 ash022@login-2.saga.sigma2.no
+```
+
 Open:
 
 ```text
-http://127.0.0.1:8765
+http://127.0.0.1:8765/
 ```
+
+The explorer shows all upstream RNA and progression candidates. `event_display` contains reads overlapping the locus, `exact_alt_display` contains reads classified as exact alternate-supporting, and `reference_display` contains clean reference-supporting reads. Overlap alone is not alternate-allele evidence; use `ExactAltReads`, `CleanReferenceReads`, `ExcludedReads`, `AltFractionAmongClean`, and the validation status for interpretation.
+
+A browser request for `/favicon.ico` may return HTTP 404. That request is harmless and does not affect the explorer or generated alignment reports.
+
 ## License
 
 See `LICENSE`.

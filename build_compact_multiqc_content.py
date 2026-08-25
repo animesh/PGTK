@@ -155,7 +155,7 @@ def main():
         stages.setdefault(sample, {})[stage] = number(
             pick(row, "Alleles", "Records", "Count", "Variants")
         )
-    emit(output_dir, "01_pgtk_variant_attrition", "Variant attrition", stages,
+    emit(output_dir, "pgtk_variant_attrition", "Variant attrition", stages,
          "Allele counts retained from raw calls through PASS, RNA validation and progression subtraction.",
          "Alleles")
 
@@ -167,7 +167,7 @@ def main():
         evidence.setdefault(sample, {})[event_class] = count
     if not evidence or not any(value > 0 for sample in evidence.values() for value in sample.values()):
         raise SystemExit("RNA evidence inventory produced no positive counts")
-    emit(output_dir, "02_pgtk_rna_evidence", "RNA evidence", evidence,
+    emit(output_dir, "pgtk_rna_evidence", "RNA evidence", evidence,
          "Validated fusion rows and validated-splice audit rows by sample. Different event classes use different counting units.",
          "Rows")
 
@@ -180,14 +180,14 @@ def main():
                     progression.setdefault(sample, {})[key] = float(value)
                 except (TypeError, ValueError):
                     pass
-    emit(output_dir, "03_pgtk_progression", "Progression evidence", progression,
+    emit(output_dir, "pgtk_progression", "Progression evidence", progression,
          "Nonbaseline-only progression evidence. RNA absence at baseline is not DNA confirmation.", "Count")
 
-    build_go_plot(output_dir, "04_pgtk_expression_go", "Expression GO enrichment",
+    build_go_plot(output_dir, "pgtk_expression_go", "Expression GO enrichment",
                   args.expression_ora, "ora")
-    build_go_plot(output_dir, "05_pgtk_ranked_go", "Ranked expression GO",
+    build_go_plot(output_dir, "pgtk_ranked_go", "Ranked expression GO",
                   args.ranked_go, "ranked")
-    build_go_plot(output_dir, "06_pgtk_variant_set_go", "Progression variant-set GO",
+    build_go_plot(output_dir, "pgtk_variant_set_go", "Progression variant-set GO",
                   args.variant_set_go, "ora")
 
     overlap, concordance = {}, {}
@@ -199,12 +199,13 @@ def main():
             overlap.setdefault(label, {})["PGTK overlap %"] = value
         if "concordance" in metric and ("percent" in metric or "%" in metric):
             concordance.setdefault(label, {})["Genotype concordance %"] = value
-    if len(overlap) != 9 or len(concordance) != 9:
-        raise SystemExit(f"expected 9 Sarek stage comparisons, found overlap={len(overlap)}, concordance={len(concordance)}")
-    emit(output_dir, "07_pgtk_sarek_overlap", "Sarek overlap", overlap,
-         "Percentage of each PGTK stage present in the external Sarek callset.", "Percent", 100)
-    emit(output_dir, "08_pgtk_sarek_concordance", "Sarek genotype concordance", concordance,
-         "Genotype concordance among alleles shared with Sarek.", "Percent", 100)
+    if overlap or concordance:
+        if len(overlap) != 9 or len(concordance) != 9:
+            raise SystemExit(f"expected 9 external-caller stage comparisons, found overlap={len(overlap)}, concordance={len(concordance)}")
+        emit(output_dir, "pgtk_external_overlap", "External caller overlap", overlap,
+             "Percentage of each PGTK stage present in the configured external callset.", "Percent", 100)
+        emit(output_dir, "pgtk_external_concordance", "External caller genotype concordance", concordance,
+             "Genotype concordance among alleles shared with the configured external caller.", "Percent", 100)
 
     proteogenomics = metrics(args.proteogenomics_summary)
     integrated = metrics(args.integrated_report)
@@ -217,7 +218,7 @@ def main():
         "Absent from canonical and Ensembl": require_metric(proteogenomics, "Canonical-and-reference-absent variant events"),
         "Strict integrated events": require_metric(integrated, "Strict integrated events"),
     }
-    emit(output_dir, "09_pgtk_maxquant_evidence", "MaxQuant evidence funnel",
+    emit(output_dir, "pgtk_maxquant_evidence", "MaxQuant evidence funnel",
          {"Evidence": funnel},
          "Explicit event-level evidence funnel. Stages are selected by metric name and never by report-text order.",
          "Events")
@@ -231,13 +232,13 @@ def main():
             "complex_allele events", "insertion events",
         ]
     }
-    emit(output_dir, "10_pgtk_read_validation", "Read-level validation",
+    emit(output_dir, "pgtk_read_validation", "Read-level validation",
          {"Observed": read_summary}, "Compact read-evidence event summary.", "Count")
 
     codon = metrics(args.codon_summary)
     provenance = metrics(args.provenance_summary)
     independent = dict(list(codon.items())[:8] + list(provenance.items())[:8])
-    emit(output_dir, "11_pgtk_independent_validation", "Independent validation",
+    emit(output_dir, "pgtk_independent_validation", "Independent validation",
          {"Validated": independent}, "Codon and read-provenance validation summary.", "Count")
 
     links = [
@@ -251,7 +252,7 @@ def main():
     ]
     guide = """<h3>PGTK Results Guide and Navigation</h3><p><b>Start here.</b> Raw, normalized, hard-filtered, PASS, RNA-validated and progression calls are distinct stages.</p><ul><li><b>RNA validated:</b> RNA-supported and protein-altering by VEP, not DNA-confirmed.</li><li><b>Progression nonbaseline-only:</b> absent from baseline RNA callset, not proof of DNA acquisition.</li><li><b>Nonsynonymous GO:</b> over-representation among unique genes with protein-altering VEP consequences.</li><li><b>Offline explorer:</b> direct-open compact finding metadata and precomputed evidence counts; server mode is optional for full IGV Reports.</li></ul><h4>Variant landscape files</h4><ul><li><code>variant_landscape.summary.tsv</code>: sample-stage variant counts.</li><li><code>variant_landscape.nonsynonymous_genes.tsv</code>: unique protein-altering genes.</li><li><code>variant_landscape.go_significant.tsv</code>: FDR-significant terms only.</li><li><code>variant_landscape.go_top.tsv</code>: top 100 ranked terms per sample-stage.</li><li><code>variant_landscape.go_summary.tsv</code>: tested and significant term counts.</li></ul>"""
     body = '<div class="alert alert-info">' + guide + '</div><h4>Open detailed outputs</h4><ul>' + "".join(f'<li><a href="{url}">{html.escape(label)}</a></li>' for label, url in links) + "</ul>"
-    (output_dir / "pgtk_results_guide_mqc.html").write_text(body, encoding="utf-8")
+    (output_dir / "pgtk_results_guide_mqc.html").write_text("---\nid: pgtk_results_guide\nsection_name: PGTK results overview\n---\n" + body, encoding="utf-8")
 
 
 if __name__ == "__main__":

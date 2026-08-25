@@ -47,3 +47,4 @@ validate_rna_events.py
 validate_splice_junction_peptides.py
 validate_variant_codons.py
 validate_variant_read_provenance.py
+build_results_catalogue.py
