@@ -8,8 +8,10 @@ Synonymous VEP consequences pass as `SYNONYMOUS_CODON_TRANSLATION_CONFIRMED` whe
 
 Strict integrated evidence requires `Codon strict-integration eligible = yes`, sample-matched direct MS/MS, a search-consistent altered-residue peptide, and absence from both canonical reference sets.
 
-## Resource profiles
+## Resource profile
 
-`calibrated` is the production default and is based on successful Saga job 19002083. `conservative` uses the larger directives embedded in `main.nf`. `recovery` retries only exit codes 137, 140, and 143 and escalates resources for selected heavy processes.
+`robust` is the only configured Nextflow profile and is the production default. `scratch.slurm` selects it unless `PGTK_PROFILE` or `--profile` explicitly supplies another configured profile.
 
-The Slurm wrapper writes Nextflow trace, report, timeline, DAG, and post-run resource summaries under `results/`.
+The `robust` profile applies process-specific CPU, memory, and time directives for Saga. Retry attempts increase resources for configured processes within the limits set by `PGTK_MAX_CPUS` and `PGTK_MAX_MEMORY_GB`. Retry eligibility and exit-status handling are defined by `nextflow.config`; this document does not define additional `calibrated`, `conservative`, or `recovery` profiles.
+
+The Slurm wrapper writes Nextflow trace, report, timeline, DAG, failure-ledger, and post-run resource summaries under the configured results directory.

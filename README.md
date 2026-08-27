@@ -239,40 +239,29 @@ flowchart TD
 
 ## End-to-end Saga run procedure
 
-### 1. Clone or enter the minimal repository
+### 1. Clone the repository or enter an existing checkout
 
 ```bash
+cd /cluster/projects/nn9036k/scrbkup
+git clone https://github.com/animesh/pgtk.git PGTK-minimal-audited
 cd /cluster/projects/nn9036k/scrbkup/PGTK-minimal-audited
+export PROJECT_DIR="$(pwd -P)"
+test "$PROJECT_DIR" = /cluster/projects/nn9036k/scrbkup/PGTK-minimal-audited
 ```
 
-Confirm that the manifest contains exactly 50 unique entries and that every listed source file exists and is non-empty:
+Confirm the exact source set:
 
 ```bash
-awk 'NF { count++; seen[$0]++ } END {
-  printf "Manifest entries: %d\n", count
-  for (file in seen) {
-    if (seen[file] > 1) {
-      printf "DUPLICATE: %s (%d entries)\n", file, seen[file]
-      failed = 1
-    }
-  }
-  exit failed
-}' pipeline_required_files.txt
+find . -maxdepth 1 -type f -printf '%f\n' | sort | wc -l
 
-test "$(awk 'NF { count++ } END { print count }' pipeline_required_files.txt)" -eq 50
-
-test "$(grep -Fxc 'build_results_catalogue.py' pipeline_required_files.txt)" -eq 1
-
-while IFS= read -r file; do
-  [[ -z "$file" ]] && continue
-  test -s "$file" || {
-    printf 'MISSING OR EMPTY: %s\n' "$file" >&2
-    exit 1
-  }
-done < pipeline_required_files.txt
+comm -3 \
+  <(sort pipeline_required_files.txt) \
+  <(find . -maxdepth 1 -type f \
+      ! -name pipeline_required_files.txt \
+      -printf '%f\n' | sort)
 ```
 
-Do not compare the manifest against every top-level file in the working directory. Production runs intentionally create logs, validation reports, job-ID files, caches, and downloaded archives that are not source-manifest entries.
+Expected manifest-listed production files: `50`. `pipeline_required_files.txt` is the manifest itself and is therefore an additional top-level source file. The `comm` command excludes the manifest and must produce no output.
 
 ### 2. Configure the samplesheet
 
@@ -299,38 +288,35 @@ Field meanings:
 - `Group`: descriptive metadata retained in outputs.
 - `baseline`: exactly one `true` sample per subject when progression subtraction is required. Values must be `true` or `false`.
 
-### 3. Define runtime locations
+### 3. Define the exact Saga runtime
+
+Run this in every new login shell. Do not reuse variables from another checkout.
 
 ```bash
-export PROJECT_DIR="$PWD"
+cd /cluster/projects/nn9036k/scrbkup/PGTK-minimal-audited
+export PROJECT_DIR="$(pwd -P)"
 export CONTAINER_CACHE="$PROJECT_DIR/singularity_cache"
 export REFERENCE_DOWNLOADS="$PROJECT_DIR/reference_downloads"
 export SRA_DIR="$PROJECT_DIR/sra_cache"
 export RESULTS_DIR="$PROJECT_DIR/results"
-
 export WORK_DIR=/cluster/work/users/ash022/pgtk-work
 export TMP_ROOT=/cluster/work/users/ash022/pgtk-tmp
 export NXF_HOME_DIR="$PROJECT_DIR/.nextflow_home"
-
-export NEXTFLOW="$HOME/bin/nextflow"
-export HOST_PYTHON="$(command -v python3)"
-export APPTAINER="$(command -v apptainer)"
-
-mkdir -p \
-  "$CONTAINER_CACHE" \
-  "$REFERENCE_DOWNLOADS" \
-  "$SRA_DIR" \
-  "$RESULTS_DIR" \
-  "$WORK_DIR" \
-  "$TMP_ROOT" \
-  "$NXF_HOME_DIR"
+export NEXTFLOW=/cluster/home/ash022/bin/nextflow
+export HOST_PYTHON=/cluster/software/Mamba/4.14.0-0/bin/python3
+export APPTAINER=/usr/bin/apptainer
+export PYSAM_IMAGE="$CONTAINER_CACHE/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img"
+export ENSEMBL_PEP="$REFERENCE_DOWNLOADS/Homo_sapiens.GRCh38.pep.all.fa.gz"
+export APPTAINER_BIND=/cluster
+export SINGULARITY_BIND=/cluster
+mkdir -p "$CONTAINER_CACHE" "$REFERENCE_DOWNLOADS" "$SRA_DIR" "$RESULTS_DIR" "$WORK_DIR" "$TMP_ROOT" "$NXF_HOME_DIR"
 ```
 
-Check storage:
+The `/cluster` bind is required because runtime validation executes project scripts inside the pinned containers.
 
 ```bash
-df -h "$PROJECT_DIR" "$WORK_DIR"
-df -i "$PROJECT_DIR" "$WORK_DIR"
+"$APPTAINER" exec --cleanenv --bind /cluster "$PYSAM_IMAGE"   python3 "$PROJECT_DIR/build_igv_evidence_bundle.py" --help >/dev/null
+echo "PASS: project source visible inside Pysam container"
 ```
 
 ### 4. Download containers and references
@@ -433,6 +419,7 @@ RESULT: PASSED
 For the first core run, keep optional Sarek and MaxQuant branches disabled:
 
 ```bash
+APPTAINER_BIND=/cluster SINGULARITY_BIND=/cluster \
 "$HOST_PYTHON" -u validate_runtime_inputs.py \
   --project-dir "$PROJECT_DIR" \
   --reference-downloads "$REFERENCE_DOWNLOADS" \
@@ -462,48 +449,57 @@ PASS: all samples and vdb-validated SRA archives
 PASS: enabled optional branches and exact inputs
 ```
 
-### 8. Submit the initial core pipeline
+### 8. Submit the core pipeline
+
+Use this self-contained command. Absolute paths prevent stale variables from another checkout from entering the job.
 
 ```bash
-cd "$PROJECT_DIR"
-
+cd /cluster/projects/nn9036k/scrbkup/PGTK-minimal-audited
 JOB_ID=$(
-  sbatch \
-    --parsable \
-    --account=nn9036k \
-    --partition=normal \
-    --export=ALL,\
-PGTK_ACCOUNT=nn9036k,\
-PGTK_NORMAL_PARTITION=normal,\
-PGTK_BIGMEM_PARTITION=bigmem,\
-PGTK_PROJECT_DIR="$PROJECT_DIR",\
-PGTK_WORK_DIR="$WORK_DIR",\
-PGTK_TMP_ROOT="$TMP_ROOT",\
-PGTK_NXF_HOME="$NXF_HOME_DIR",\
-PGTK_CONTAINER_CACHE="$CONTAINER_CACHE",\
-PGTK_PYSAM_IMAGE="$PYSAM_IMAGE",\
-PGTK_SRA_DIR="$SRA_DIR",\
-PGTK_REFERENCE_DOWNLOADS="$REFERENCE_DOWNLOADS",\
-PGTK_SAMPLESHEET="$PROJECT_DIR/samples.csv",\
-PGTK_RESULTS_DIR="$RESULTS_DIR",\
-PGTK_NEXTFLOW="$NEXTFLOW",\
-PGTK_PYTHON="$HOST_PYTHON",\
-PGTK_APPTAINER="$APPTAINER",\
-PGTK_JAVA_MODULE=Java/21,\
-PGTK_SLURM_LOG_TEMPLATE="$PROJECT_DIR/pgtk-wrapper-{job_id}.log" \
-    scratch.slurm \
-    -- \
+  PGTK_ACCOUNT=nn9036k \
+  PGTK_NORMAL_PARTITION=normal \
+  PGTK_BIGMEM_PARTITION=bigmem \
+  PGTK_PROJECT_DIR=/cluster/projects/nn9036k/scrbkup/PGTK-minimal-audited \
+  PGTK_WORK_DIR=/cluster/work/users/ash022/pgtk-work \
+  PGTK_TMP_ROOT=/cluster/work/users/ash022/pgtk-tmp \
+  PGTK_NXF_HOME=/cluster/projects/nn9036k/scrbkup/PGTK-minimal-audited/.nextflow_home \
+  PGTK_CONTAINER_CACHE=/cluster/projects/nn9036k/scrbkup/PGTK-minimal-audited/singularity_cache \
+  PGTK_PYSAM_IMAGE=/cluster/projects/nn9036k/scrbkup/PGTK-minimal-audited/singularity_cache/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img \
+  PGTK_SRA_DIR=/cluster/projects/nn9036k/scrbkup/PGTK-minimal-audited/sra_cache \
+  PGTK_REFERENCE_DOWNLOADS=/cluster/projects/nn9036k/scrbkup/PGTK-minimal-audited/reference_downloads \
+  PGTK_SAMPLESHEET=/cluster/projects/nn9036k/scrbkup/PGTK-minimal-audited/samples.csv \
+  PGTK_RESULTS_DIR=/cluster/projects/nn9036k/scrbkup/PGTK-minimal-audited/results \
+  PGTK_NEXTFLOW=/cluster/home/ash022/bin/nextflow \
+  PGTK_PYTHON=/cluster/software/Mamba/4.14.0-0/bin/python3 \
+  PGTK_APPTAINER=/usr/bin/apptainer \
+  PGTK_JAVA_MODULE=Java/21 \
+  PGTK_SLURM_LOG_TEMPLATE=/cluster/projects/nn9036k/scrbkup/PGTK-minimal-audited/pgtk-wrapper-{job_id}.log \
+  APPTAINER_BIND=/cluster \
+  SINGULARITY_BIND=/cluster \
+  sbatch --parsable --account=nn9036k --partition=normal --export=ALL \
+    scratch.slurm -- \
     --run_external_vcf_comparison false \
     --run_proteogenomic_validation false
 )
-
-printf '%s\n' "$JOB_ID" | tee "$PROJECT_DIR/.pgtk_current_job_id"
+printf '%s\n' "$JOB_ID" | tee .pgtk_current_job_id
 printf 'JOB_ID=%s\n' "$JOB_ID"
 ```
 
-The wrapper automatically repeats source and runtime validation before launching Nextflow.
+The standard command resumes compatible cached work. For a fresh recomputation, use new empty values for `PGTK_WORK_DIR`, `PGTK_TMP_ROOT`, `PGTK_RESULTS_DIR`, and `PGTK_NXF_HOME`; keep references, containers, and SRA archives shared.
 
 ### 9. Monitor execution
+
+Confirm that the wrapper uses the intended checkout:
+
+```bash
+cd /cluster/projects/nn9036k/scrbkup/PGTK-minimal-audited
+JOB_ID=$(cat .pgtk_current_job_id)
+grep -m1 '^Project:' "pgtk-wrapper-${JOB_ID}.log"
+grep -m1 '^Failure ledger:' "pgtk-wrapper-${JOB_ID}.log" || true
+```
+
+Both paths must start with `/cluster/projects/nn9036k/scrbkup/PGTK-minimal-audited`.
+
 
 ```bash
 cd "$PROJECT_DIR"
