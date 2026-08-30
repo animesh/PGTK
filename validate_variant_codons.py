@@ -9,6 +9,7 @@ import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
+from variant_read_evidence import classify_sam_fields
 
 CODE = {
     'TTT':'F','TTC':'F','TTA':'L','TTG':'L','TCT':'S','TCC':'S','TCA':'S','TCG':'S','TAT':'Y','TAC':'Y','TAA':'*','TAG':'*','TGT':'C','TGC':'C','TGA':'*','TGG':'W',
@@ -85,36 +86,9 @@ def codon_check(csq):
 def cigar_ops(cigar):
     return [(int(length), operation) for length, operation in re.findall(r'(\d+)([MIDNSHP=X])', cigar)]
 
-def alignment_observation(fields, position, ref, alt, min_base_quality):
-    flag = int(fields[1]); start = int(fields[3]); sequence = fields[9]; qualities = fields[10]
-    operations = cigar_ops(fields[5]); ref_pos = start; read_pos = 0
-    for index, (length, operation) in enumerate(operations):
-        if operation in 'M=X':
-            if ref_pos <= position < ref_pos + length:
-                anchor = read_pos + position - ref_pos
-                base_quality = ord(qualities[anchor]) - 33 if qualities != '*' and anchor < len(qualities) else 0
-                if base_quality < min_base_quality:
-                    return ''
-                if len(ref) == len(alt) == 1:
-                    return sequence[anchor].upper()
-                if len(alt) > len(ref) and alt.startswith(ref):
-                    if position == ref_pos + length - 1 and index + 1 < len(operations) and operations[index + 1][1] == 'I':
-                        inserted = operations[index + 1][0]
-                        return ref[0].upper() + sequence[anchor + 1:anchor + 1 + inserted].upper()
-                    return ref.upper()
-                if len(ref) > len(alt) and ref.startswith(alt):
-                    if position == ref_pos + length - 1 and index + 1 < len(operations) and operations[index + 1][1] == 'D' and operations[index + 1][0] == len(ref) - len(alt):
-                        return alt.upper()
-                    return ref.upper()
-                return ''
-            ref_pos += length; read_pos += length
-        elif operation == 'I':
-            read_pos += length
-        elif operation in 'DN':
-            ref_pos += length
-        elif operation == 'S':
-            read_pos += length
-    return ''
+def alignment_observation(fields,position,ref,alt,min_base_quality):
+    c,r,o,q=classify_sam_fields(fields,position,ref,alt,0,min_base_quality)
+    return alt.upper() if c=='EXACT_ALT' else ref.upper() if c=='CLEAN_REFERENCE' else ''
 
 def resolve_contig(alignment, chrom):
     names = set(alignment.references)
@@ -228,10 +202,10 @@ def main():
                 ) else ''
                 ref_reads = counts[ref.upper()]; alt_reads = counts[alt_key] if alt_key else 0
                 depth = sum(counts.values())
-                informative = ref_reads + alt_reads; alt_fraction = alt_reads / informative if informative else 0.0
+                informative = ref_reads + alt_reads; alt_fraction = alt_reads / informative if informative else None
                 if not alt_key: read_status = 'COMPLEX_ALLELE_NOT_COUNTED'
                 elif alt_reads < args.min_alt_reads: read_status = 'ALT_READS_BELOW_MINIMUM'
-                elif alt_fraction < args.min_alt_fraction: read_status = 'ALT_FRACTION_BELOW_MINIMUM'
+                elif alt_fraction is not None and alt_fraction < args.min_alt_fraction: read_status = 'ALT_FRACTION_BELOW_MINIMUM'
                 else: read_status = 'ALT_READS_VALIDATED'
                 annotations = []
                 for text in info.get('CSQ','').split(','):
@@ -254,7 +228,7 @@ def main():
                     rows.append({
                         'Sample':sample,'VCF':Path(vcf).name,'Chromosome':chrom,'Position':pos,'ID':variant_id,'REF':ref,'ALT':alt,
                         'Genome sequence at REF locus':genome_ref,'Genome REF status':genome_status,'BAM':bams[sample].name,'Pileup depth':depth,
-                        'REF-supporting reads':ref_reads,'ALT-supporting reads':alt_reads,'Informative allele reads':informative,'ALT fraction':f'{alt_fraction:.6g}',
+                        'REF-supporting reads':ref_reads,'ALT-supporting reads':alt_reads,'Informative allele reads':informative,'ALT fraction':f'{alt_fraction:.6g}' if alt_fraction is not None else 'NA',
                         'Pileup ALT key':alt_key,'Pileup allele counts':';'.join(f'{key}:{value}' for key,value in sorted(counts.items())),'Read ALT status':read_status,
                         'Gene':csq.get('SYMBOL',''),'Transcript':csq.get('Feature',''),'Protein':csq.get('ENSP',''),'Consequence':csq.get('Consequence',''),
                         'HGVSc':csq.get('HGVSc',''),'HGVSp':csq.get('HGVSp',''),'VEP codons':csq.get('Codons',''),'Reference codon':ref_codon,

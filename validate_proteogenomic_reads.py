@@ -10,6 +10,7 @@ import argparse, csv, gzip, json, re, subprocess, sys
 import pysam
 from collections import Counter, defaultdict
 from pathlib import Path
+from variant_read_evidence import classify_sam_fields
 
 CIGAR_RE = re.compile(r"(\d+)([MIDNSHP=X])")
 ATTR_RE = re.compile(r'(\S+) "([^"]*)";')
@@ -127,7 +128,7 @@ def main():
     ap.add_argument("--bam",action="append",required=True,metavar="SAMPLE=PATH")
     ap.add_argument("--gtf",required=True); ap.add_argument("--genome",required=True)
     ap.add_argument("--output-prefix",default="proteogenomic_read_validation")
-    ap.add_argument("--padding",type=int,default=150)
+    ap.add_argument("--padding",type=int,default=150); ap.add_argument("--min-mapping-quality",type=int,default=20); ap.add_argument("--min-base-quality",type=int,default=20)
     args=ap.parse_args()
     if not getattr(pysam, "__samtools_version__", ""):
         raise SystemExit("pysam does not expose an HTSlib/samtools runtime")
@@ -152,9 +153,8 @@ def main():
             for line in text.splitlines():
                 f=line.split("\t");
                 if len(f)<11:continue
-                flag=int(f[1]); start=int(f[3]); obs,bq,rpos,otype=cigar_observation(f[9],f[10],f[5],start,pos,ref,alt)
-                if not obs:continue
-                support=support_class(obs,kind,ref,alt); counts[support]+=1; mapqs.append(int(f[4]));
+                flag=int(f[1]); start=int(f[3]); classification,otype,obs,qtext=classify_sam_fields(f,pos,ref,alt,args.min_mapping_quality,args.min_base_quality)
+                support="ALT" if classification=="EXACT_ALT" else "REF" if classification=="CLEAN_REFERENCE" else "OTHER"; bq=int(qtext.split(";",1)[0]) if qtext and qtext.split(";",1)[0].isdigit() else None; rpos=""; counts[support]+=1; mapqs.append(int(f[4]));
                 if bq is not None:bqs.append(bq)
                 strand="-" if flag&16 else "+"; strands[(support,strand)]+=1
                 mate="R1" if flag&64 else "R2" if flag&128 else "unpaired"; mates[(support,mate)]+=1

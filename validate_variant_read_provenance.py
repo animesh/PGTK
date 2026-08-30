@@ -6,6 +6,7 @@ import re
 import pysam
 import sys
 from pathlib import Path
+from variant_read_evidence import classify_sam_fields
 
 
 def open_text(path):
@@ -150,11 +151,12 @@ def main():
                         seen.add(read_key)
                         fields = read_fields(read, alignment)
                         for _chrom, _position, variant_id, ref, alt in position_map[position]:
+                            classification, reason, observed, quality = classify_sam_fields(fields, position, ref, alt, args.min_mapping_quality, args.min_base_quality)
+                            if classification != 'EXACT_ALT':
+                                continue
                             observation = observe(fields, position, ref, alt)
-                            if observation['Observed allele'] != alt.upper():
-                                continue
-                            if observation['Base quality'] != '' and int(observation['Base quality']) < args.min_base_quality:
-                                continue
+                            observation['Observed allele'] = alt.upper()
+                            observation['Base quality'] = quality
                             fastq = f'{sample}_{observation["Mate"]}.fastq.gz' if observation['Mate'] in {'R1','R2'} else f'{sample}.fastq.gz'
                             output.append({
                                 'Sample': sample, 'SRA': samples.get(sample, {}).get('SRA', ''), 'Source FASTQ': fastq,

@@ -854,6 +854,7 @@ process VALIDATE_VARIANT_CODONS {
     tuple val(meta), path(vcf), path(tbi), path(bam), path(bai)
     path genome
     path validation_script
+    path read_evidence_script
     output:
     tuple val(meta), path("${meta.sample}.variant_codon_validation.all.tsv"), path("${meta.sample}.variant_codon_validation.validated.tsv"), path("${meta.sample}.variant_codon_validation.partial.tsv"), path("${meta.sample}.variant_codon_validation.failed.tsv"), path("${meta.sample}.variant_codon_validation.category_summary.tsv"), path("${meta.sample}.variant_codon_validation.summary.txt"), path("${meta.sample}.variant_codon_validation.report.md")
     script:
@@ -880,6 +881,7 @@ process VALIDATE_VARIANT_READ_PROVENANCE {
     tuple val(meta), path(vcf), path(tbi), path(bam), path(bai)
     path samplesheet
     path validation_script
+    path read_evidence_script
     output:
     tuple val(meta), path("${meta.sample}.variant_read_provenance.supporting_reads.tsv"), path("${meta.sample}.variant_read_provenance.summary.txt"), path("${meta.sample}.variant_read_provenance.report.md")
     script:
@@ -1564,6 +1566,7 @@ process BUILD_FINDING_IGV_REVIEWS {
     path event_bams
     path genome
     path review_script
+    path read_evidence_script
     output:
     path 'finding_reviews', emit: reviews
     script:
@@ -1676,6 +1679,7 @@ process BUILD_FINDING_EXPLORER {
     path genome
     path explorer_script
     path server_launcher
+    path report_legend_script
     output:
     path 'finding_explorer', emit: explorer
     script:
@@ -1684,6 +1688,8 @@ process BUILD_FINDING_EXPLORER {
     mkdir -p finding_explorer
     python3 ${explorer_script} --manifest ${finding_reviews}/findings_manifest.tsv --excluded-reads ${finding_reviews}/excluded_reads.tsv --bam-manifest ${finding_reviews}/bam_manifest.tsv --genome ${genome} --flanking ${params.read_validation_padding} --output-dir finding_explorer
     cp ${server_launcher} finding_explorer/serve_explorer.sh
+    cp ${report_legend_script} finding_explorer/report_legend.py
+    test -s finding_explorer/report_legend.py
     total=\$(awk -F': ' '\$1=="Findings" {print \$2}' finding_explorer/coverage_summary.txt)
     records=\$(awk -F': ' '\$1=="Embedded compact records" {print \$2}' finding_explorer/coverage_summary.txt)
     discarded=\$(awk -F': ' '\$1=="Findings discarded" {print \$2}' finding_explorer/coverage_summary.txt)
@@ -2135,6 +2141,7 @@ process VALIDATE_PROTEOGENOMIC_READS {
     path reference_gtf
     path genome
     path validation_script
+    path read_evidence_script
     output:
     path 'proteogenomic_read_validation.events.tsv'
     path 'proteogenomic_read_validation.reads.tsv'
@@ -2160,6 +2167,8 @@ process VALIDATE_PROTEOGENOMIC_READS {
         --gtf ${reference_gtf} \
         --genome ${genome} \
         --padding ${params.read_validation_padding} \
+        --min-mapping-quality ${params.finding_review_mapq} \
+        --min-base-quality ${params.finding_review_baseq} \
         --output-prefix proteogenomic_read_validation
     """
 }
@@ -2377,12 +2386,13 @@ workflow {
     }
     variant_read_provenance_script = file("${projectDir}/validate_variant_read_provenance.py", checkIfExists:true)
     variant_codon_script = file("${projectDir}/validate_variant_codons.py", checkIfExists:true)
+    variant_read_evidence_script = file("${projectDir}/variant_read_evidence.py", checkIfExists:true)
     variant_validation_merger = file("${projectDir}/merge_variant_validation.py", checkIfExists:true)
     validated_variant_keyed = validated_variants.validated.map { m,v,t -> tuple(m.sample,m,v,t) }
     sorted_bam_keyed_for_variant_validation = sortedbam.map { m,b,bai -> tuple(m.sample,b,bai) }
     variant_validation_inputs = validated_variant_keyed.join(sorted_bam_keyed_for_variant_validation).map { sample,m,v,t,b,bai -> tuple(m,v,t,b,bai) }
-    variant_codon_parts = VALIDATE_VARIANT_CODONS(variant_validation_inputs, refs.genome, variant_codon_script)
-    variant_provenance_parts = VALIDATE_VARIANT_READ_PROVENANCE(variant_validation_inputs, file(params.samplesheet, checkIfExists:true), variant_read_provenance_script)
+    variant_codon_parts = VALIDATE_VARIANT_CODONS(variant_validation_inputs, refs.genome, variant_codon_script, variant_read_evidence_script)
+    variant_provenance_parts = VALIDATE_VARIANT_READ_PROVENANCE(variant_validation_inputs, file(params.samplesheet, checkIfExists:true), variant_read_provenance_script, variant_read_evidence_script)
     variant_codon_validation = MERGE_VARIANT_CODON_VALIDATION(variant_codon_parts.map { m,a,v,p,f,c,s,r -> [a,v,p,f,c,s,r] }.flatten().collect(), variant_validation_merger)
     codon_mismatch_script = file("${projectDir}/analyze_codon_mismatches.py", checkIfExists:true)
     codon_mismatch_analysis = ANALYZE_CODON_MISMATCHES(variant_codon_validation.all, codon_mismatch_script)
@@ -2504,13 +2514,15 @@ workflow {
         igv_bundle.events,
         igv_bundle.bams.collect(),
         refs.genome,
-        finding_review_script
+        finding_review_script,
+        variant_read_evidence_script
     )
     catalogue_explorer_ready = finding_reviews.reviews
     if (strictBooleanParam(params.generate_priority_igv_reports, '--generate_priority_igv_reports')) {
         finding_explorer_script=file("${projectDir}/build_finding_explorer.py",checkIfExists:true)
         finding_explorer_launcher=file("${projectDir}/serve_finding_explorer.sh",checkIfExists:true)
-        finding_explorer=BUILD_FINDING_EXPLORER(finding_reviews.reviews, refs.genome, finding_explorer_script, finding_explorer_launcher)
+        finding_explorer_legend=file("${projectDir}/report_legend.py",checkIfExists:true)
+        finding_explorer=BUILD_FINDING_EXPLORER(finding_reviews.reviews, refs.genome, finding_explorer_script, finding_explorer_launcher, finding_explorer_legend)
         catalogue_explorer_ready = finding_explorer.explorer
     }
     comparative_report_script=file("${projectDir}/build_comparative_advantage_report.py", checkIfExists:true)
@@ -2614,7 +2626,7 @@ workflow {
         integrated_variant_script = file("${projectDir}/build_integrated_variant_evidence.py", checkIfExists:true)
         integrated_variant_evidence = BUILD_INTEGRATED_VARIANT_EVIDENCE(evidence_report.variants, variant_codon_validation.all, codon_mismatch_analysis.detailed, integrated_variant_script)
         sorted_bams_for_validation = sortedbam.map { m,b,bai -> [b,bai] }.flatten().collect()
-        read_validation = VALIDATE_PROTEOGENOMIC_READS(evidence_report.variants, evidence_report.junctions, splice_validation.detailed, arriba_tables_for_validation, sorted_bams_for_validation, refs.gtf, refs.genome, read_validation_script)
+        read_validation = VALIDATE_PROTEOGENOMIC_READS(evidence_report.variants, evidence_report.junctions, splice_validation.detailed, arriba_tables_for_validation, sorted_bams_for_validation, refs.gtf, refs.genome, read_validation_script, variant_read_evidence_script)
         validation_semantics_doc = file("${projectDir}/PIPELINE_VALIDATION_SEMANTICS.md", checkIfExists:true)
         final_multiqc_content = PREPARE_FINAL_MULTIQC_CONTENT(
             comparative_report.variant_inventory,

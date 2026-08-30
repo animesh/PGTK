@@ -2,6 +2,7 @@
 import argparse, csv, html, json, math
 from collections import defaultdict
 from pathlib import Path
+from report_legend import HTML_LEGEND
 
 def read_rows(path):
     with Path(path).open(encoding='utf-8', errors='replace', newline='') as handle:

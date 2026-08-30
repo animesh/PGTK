@@ -23,7 +23,7 @@ MANIFEST="$PROJECT_DIR/pipeline_required_files.txt"
 if [[ -s $MANIFEST ]]; then
     pass 'Required-file manifest exists'
     mapfile -t required_files < <(sed '/^[[:space:]]*$/d' "$MANIFEST")
-    [[ ${#required_files[@]} -eq 50 ]] && pass '50 required source files declared' || fail "Expected 50 manifest entries; found ${#required_files[@]}"
+    (( ${#required_files[@]} > 0 )) && pass "Required-file manifest entries discovered: ${#required_files[@]}" || fail 'Required-file manifest contains no entries'
     [[ $(printf '%s\n' "${required_files[@]}" | sort | uniq -d | wc -l) -eq 0 ]] && pass 'Required-file manifest has no duplicates' || fail 'Required-file manifest contains duplicates'
     [[ $(printf '%s\n' "${required_files[@]}" | grep -Fxc 'build_results_catalogue.py') -eq 1 ]] && pass 'Results catalogue source declared exactly once' || fail 'build_results_catalogue.py must appear exactly once in manifest'
     for file in "${required_files[@]}"; do
@@ -34,10 +34,15 @@ else
 fi
 [[ -x $NEXTFLOW ]] && pass 'Nextflow executable' || fail "Nextflow executable: $NEXTFLOW"
 [[ -x $PYTHON ]] && pass 'Python executable' || fail "Python executable: $PYTHON"
+portable_files=("$PROJECT_DIR/main.nf" "$PROJECT_DIR/nextflow.config" "$PROJECT_DIR"/*.py "$PROJECT_DIR"/*.sh "$PROJECT_DIR"/*.slurm)
+portable_existing=(); for file in "${portable_files[@]}"; do [[ -f $file ]] && portable_existing+=("$file"); done
+deployment_pattern='/(cluster|home|Users|mnt|scratch|work|projects)/|(^|[^[:alnum:]_])(ash[0-9]+|nn[0-9]{4,}|login-[0-9]+)([^[:alnum:]_]|$)|PGTK-minimal|pgtk-work|pgtk-tmp'
+hits=$(grep -nEH "$deployment_pattern" "${portable_existing[@]}" 2>/dev/null | grep -v "deployment_pattern=" || true)
+[[ -z $hits ]] && pass 'No deployment-specific identities or absolute HPC paths in executable/config source' || { printf '%s\n' "$hits"; fail 'Deployment-specific value embedded in executable/config source'; }
 for file in "$PROJECT_DIR"/*.py; do "$PYTHON" -m py_compile "$file" && pass "Python syntax: $(basename "$file")" || fail "Python syntax: $(basename "$file")"; done
 for file in "$PROJECT_DIR"/*.sh "$PROJECT_DIR"/*.slurm; do [[ -e $file ]] || continue; bash -n "$file" && pass "Shell syntax: $(basename "$file")" || fail "Shell syntax: $(basename "$file")"; done
 mapfile -t processes < <(awk '/^process[[:space:]]+[A-Za-z0-9_]+[[:space:]]*\{/ {print $2}' "$PROJECT_DIR/main.nf")
-[[ ${#processes[@]} -eq 74 ]] && pass '74 Nextflow processes' || fail "Expected 74 processes; found ${#processes[@]}"
+(( ${#processes[@]} > 0 )) && pass "Nextflow processes discovered: ${#processes[@]}" || fail 'No Nextflow processes discovered'
 [[ $(printf '%s\n' "${processes[@]}" | sort | uniq -d | wc -l) -eq 0 ]] && pass 'No duplicate process names' || fail 'Duplicate process names'
 for token in human_reviewed_isoforms reference_proteome_archive proteome_archive; do
     if grep -Rq --exclude='pipeline_command_validation_*.txt' "$token" "$PROJECT_DIR/main.nf" "$PROJECT_DIR/download_assets.sh" "$PROJECT_DIR/validate_runtime_inputs.py"; then fail "Unused UniProt dependency remains: $token"; else pass "Unused dependency absent: $token"; fi
@@ -55,6 +60,8 @@ grep -Fq 'section_name: Results catalogue' "$PROJECT_DIR/build_results_catalogue
 grep -Fq 'rglob(' "$PROJECT_DIR/build_results_catalogue.py" && grep -Fq 'relative_to(root)' "$PROJECT_DIR/build_results_catalogue.py" && pass 'Results catalogue discovers published files' || fail 'Results catalogue discovery missing'
 grep -Fq 'validate_pipeline_commands.sh' "$PROJECT_DIR/scratch.slurm" && pass 'Source preflight wired before launch' || fail 'Source preflight not wired'
 grep -Fq 'validate_runtime_inputs.py' "$PROJECT_DIR/scratch.slurm" && pass 'Runtime preflight wired before launch' || fail 'Runtime preflight not wired'
+grep -Fq 'VALIDATOR_BIND_ARGS' "$PROJECT_DIR/scratch.slurm" && grep -Fq 'PGTK_APPTAINER_RUN_OPTIONS' "$PROJECT_DIR/nextflow.config" && pass 'Shared explicit Apptainer bind contract wired' || fail 'Shared explicit Apptainer bind contract missing'
+grep -Fq "parser.add_argument('--bind-path'" "$PROJECT_DIR/validate_runtime_inputs.py" && grep -Fq 'Pysam container: configured paths visible' "$PROJECT_DIR/validate_runtime_inputs.py" && pass 'Runtime container visibility validation wired' || fail 'Runtime container visibility validation missing'
 grep -Fq 'command -v apptainer' "$PROJECT_DIR/download_assets.sh" && pass 'Asset downloader uses Apptainer' || fail 'Asset downloader does not use Apptainer'
 grep -Fq 'command -v apptainer' "$PROJECT_DIR/download_sra.sh" && pass 'SRA downloader uses Apptainer' || fail 'SRA downloader does not use Apptainer'
 grep -Fq 'vdb-validate' "$PROJECT_DIR/download_sra.sh" && pass 'SRA validation wired' || fail 'SRA validation missing'

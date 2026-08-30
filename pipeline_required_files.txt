@@ -48,3 +48,8 @@ validate_splice_junction_peptides.py
 validate_variant_codons.py
 validate_variant_read_provenance.py
 build_results_catalogue.py
+variant_read_evidence.py
+report_legend.py
+tests/test_semantics.py
+tests/validate_published_findings.py
+tests/test_container_bindings.py

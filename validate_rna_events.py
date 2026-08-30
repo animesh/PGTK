@@ -106,7 +106,14 @@ def variant_mode(a):
 def fusion_mode(a):
     with open_text(a.input) as h:r=csv.DictReader(h,delimiter='\t');fields=r.fieldnames or [];source=list(r)
     audit=[];valid=[];reject=[]
+    if 'read_identifiers' in fields and 'unique_supporting_read_names' not in fields:
+        fields.append('unique_supporting_read_names')
     for row in source:
+        if 'read_identifiers' in row:
+            identifiers=[value.strip() for value in (row.get('read_identifiers') or '').split(',') if value.strip()]
+            unique_identifiers=list(dict.fromkeys(identifiers))
+            row['read_identifiers']=','.join(unique_identifiers)
+            row['unique_supporting_read_names']=str(len(unique_identifiers))
         split=safe_int(row.get('split_reads1'))+safe_int(row.get('split_reads2'));discord=safe_int(row.get('discordant_mates'));reasons=[]
         if not row.get('breakpoint1') or not row.get('breakpoint2'):reasons.append('MISSING_BREAKPOINT')
         if split<a.min_split_reads:reasons.append('SPLIT_READS_BELOW_MINIMUM')

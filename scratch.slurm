@@ -77,6 +77,8 @@ SUBMIT_RATE_LIMIT=${PGTK_SUBMIT_RATE_LIMIT:-60/1min}
 NXF_OPTS_VALUE=${PGTK_NXF_OPTS:-'-Xms1g -Xmx6g'}
 SLURM_LOG_TEMPLATE=${PGTK_SLURM_LOG_TEMPLATE:-$PROJECT_DIR/pgtk-wrapper-{job_id}.log}
 PIPELINE_ARGS=()
+EXTRA_BIND_PATHS=()
+PREFLIGHT_ONLY=false
 while [[ $# -gt 0 ]]; do
  case "$1" in
   --project-dir) need_value "$@"; PROJECT_DIR=$2; shift 2;; --nextflow) need_value "$@"; NEXTFLOW=$2; shift 2;;
@@ -92,7 +94,7 @@ while [[ $# -gt 0 ]]; do
   --normal-memory-threshold-gb) need_value "$@"; NORMAL_MEMORY_THRESHOLD_GB=$2; shift 2;; --max-cpus) need_value "$@"; MAX_CPUS=$2; shift 2;;
   --max-memory-gb) need_value "$@"; MAX_MEMORY_GB=$2; shift 2;; --queue-size) need_value "$@"; QUEUE_SIZE=$2; shift 2;;
   --submit-rate-limit) need_value "$@"; SUBMIT_RATE_LIMIT=$2; shift 2;; --nxf-opts) need_value "$@"; NXF_OPTS_VALUE=$2; shift 2;;
-  --slurm-log-template) need_value "$@"; SLURM_LOG_TEMPLATE=$2; shift 2;; --) shift; PIPELINE_ARGS=("$@"); break;;
+  --slurm-log-template) need_value "$@"; SLURM_LOG_TEMPLATE=$2; shift 2;; --bind-path) need_value "$@"; EXTRA_BIND_PATHS+=("$2"); shift 2;; --preflight-only) PREFLIGHT_ONLY=true; shift;; --) shift; PIPELINE_ARGS=("$@"); break;;
   --help|-h) usage; exit 0;; *) die "unknown wrapper option before --: $1";;
  esac
 done
@@ -109,6 +111,40 @@ finalize(){ code=$?; trap - EXIT; set +e; [[ -s $TRACE_FILE ]] && "$HOST_PYTHON"
 trap finalize EXIT
 for f in "$PROJECT_DIR/main.nf" "$PROJECT_DIR/nextflow.config" "$SAMPLESHEET" "$PYSAM_IMAGE" "$ENSEMBL_PEP"; do [[ -s $f ]] || die "missing file: $f"; done
 for d in "$WORK_DIR" "$TMP_ROOT" "$NXF_HOME_DIR" "$CONTAINER_CACHE" "$RESULTS_DIR"; do mkdir -p "$d" || die "cannot create $d"; done
+PROJECT_DIR=$(readlink -f "$PROJECT_DIR") || die 'cannot resolve project directory'
+WORK_DIR=$(readlink -f "$WORK_DIR") || die 'cannot resolve work directory'
+TMP_ROOT=$(readlink -f "$TMP_ROOT") || die 'cannot resolve temporary root'
+NXF_HOME_DIR=$(readlink -f "$NXF_HOME_DIR") || die 'cannot resolve Nextflow home'
+CONTAINER_CACHE=$(readlink -f "$CONTAINER_CACHE") || die 'cannot resolve container cache'
+SRA_DIR=$(readlink -f "$SRA_DIR") || die 'cannot resolve SRA directory'
+REFERENCE_DOWNLOADS=$(readlink -f "$REFERENCE_DOWNLOADS") || die 'cannot resolve references'
+RESULTS_DIR=$(readlink -f "$RESULTS_DIR") || die 'cannot resolve results directory'
+SAMPLESHEET=$(readlink -f "$SAMPLESHEET") || die 'cannot resolve samplesheet'
+PYSAM_IMAGE=$(readlink -f "$PYSAM_IMAGE") || die 'cannot resolve Pysam image'
+ENSEMBL_PEP=$(readlink -f "$ENSEMBL_PEP") || die 'cannot resolve Ensembl peptide FASTA'
+BIND_CANDIDATES=("$PROJECT_DIR" "$WORK_DIR" "$TMP_ROOT" "$NXF_HOME_DIR" "$CONTAINER_CACHE" "$SRA_DIR" "$REFERENCE_DOWNLOADS" "$RESULTS_DIR" "$(dirname "$SAMPLESHEET")")
+if [[ -n ${PGTK_BIND_PATHS:-} ]]; then IFS=: read -r -a env_binds <<< "$PGTK_BIND_PATHS"; BIND_CANDIDATES+=("${env_binds[@]}"); fi
+BIND_CANDIDATES+=("${EXTRA_BIND_PATHS[@]}")
+for ((i=0; i<${#PIPELINE_ARGS[@]}; i++)); do
+ case ${PIPELINE_ARGS[i]} in
+  --external_vcf_dir|--maxquant_txt) ((i+1<${#PIPELINE_ARGS[@]})) && BIND_CANDIDATES+=("${PIPELINE_ARGS[i+1]}");;
+  --maxquant_mqpar|--maxquant_contaminants) ((i+1<${#PIPELINE_ARGS[@]})) && BIND_CANDIDATES+=("$(dirname "${PIPELINE_ARGS[i+1]}")");;
+ esac
+done
+BIND_PATHS=()
+for value in "${BIND_CANDIDATES[@]}"; do
+ [[ -n $value && -e $value ]] || die "bind path missing: $value"
+ resolved=$(readlink -f "$value") || die "cannot resolve bind path: $value"
+ [[ $resolved != *[[:space:]]* ]] || die "bind path contains whitespace: $resolved"
+ duplicate=false; for existing in "${BIND_PATHS[@]}"; do [[ $resolved == "$existing" ]] && duplicate=true && break; done
+ $duplicate || BIND_PATHS+=("$resolved")
+done
+VALIDATOR_BIND_ARGS=(); RUN_OPTIONS=()
+for path in "${BIND_PATHS[@]}"; do VALIDATOR_BIND_ARGS+=(--bind-path "$path"); RUN_OPTIONS+=(--bind "$path:$path"); done
+printf -v PGTK_APPTAINER_RUN_OPTIONS '%q ' "${RUN_OPTIONS[@]}"; PGTK_APPTAINER_RUN_OPTIONS=${PGTK_APPTAINER_RUN_OPTIONS% }
+export PGTK_APPTAINER_RUN_OPTIONS
+unset APPTAINER_BIND SINGULARITY_BIND
+printf 'Container bind contract (%d paths):\n' "${#BIND_PATHS[@]}"; printf '  %s\n' "${BIND_PATHS[@]}"
 cd "$PROJECT_DIR" || die "cannot enter project directory"
 if [[ -n $JAVA_MODULE ]]; then command -v module >/dev/null || die 'module command unavailable'; module purge; module load "$JAVA_MODULE" || die "cannot load $JAVA_MODULE"; fi
 export NXF_HOME=$NXF_HOME_DIR NXF_APPTAINER_CACHEDIR=$CONTAINER_CACHE NXF_OPTS=$NXF_OPTS_VALUE
@@ -117,5 +153,6 @@ export PGTK_ACCOUNT=$ACCOUNT PGTK_NORMAL_PARTITION=$NORMAL_PARTITION PGTK_BIGMEM
 export PGTK_NORMAL_CPU_THRESHOLD=$NORMAL_CPU_THRESHOLD PGTK_NORMAL_MEMORY_THRESHOLD_GB=$NORMAL_MEMORY_THRESHOLD_GB PGTK_MAX_CPUS=$MAX_CPUS PGTK_MAX_MEMORY_GB=$MAX_MEMORY_GB PGTK_QUEUE_SIZE=$QUEUE_SIZE PGTK_SUBMIT_RATE_LIMIT=$SUBMIT_RATE_LIMIT
 mkdir -p "$TMPDIR" "$APPTAINER_TMPDIR" "$RESULTS_DIR/failure_logs"
 bash "$PROJECT_DIR/validate_pipeline_commands.sh" --project-dir "$PROJECT_DIR" --nextflow "$NEXTFLOW" --python "$HOST_PYTHON" || die 'source validation failed'
-"$HOST_PYTHON" "$PROJECT_DIR/validate_runtime_inputs.py" --project-dir "$PROJECT_DIR" --reference-downloads "$REFERENCE_DOWNLOADS" --container-cache "$CONTAINER_CACHE" --sra-dir "$SRA_DIR" --samplesheet "$SAMPLESHEET" --work-dir "$WORK_DIR" --tmp-root "$TMP_ROOT" --results-dir "$RESULTS_DIR" --host-python "$HOST_PYTHON" --apptainer "$APPTAINER" --pysam-image "$PYSAM_IMAGE" --nextflow "$NEXTFLOW" -- "${PIPELINE_ARGS[@]}" || die 'runtime validation failed'
+"$HOST_PYTHON" "$PROJECT_DIR/validate_runtime_inputs.py" --project-dir "$PROJECT_DIR" --reference-downloads "$REFERENCE_DOWNLOADS" --container-cache "$CONTAINER_CACHE" --sra-dir "$SRA_DIR" --samplesheet "$SAMPLESHEET" --work-dir "$WORK_DIR" --tmp-root "$TMP_ROOT" --results-dir "$RESULTS_DIR" --host-python "$HOST_PYTHON" --apptainer "$APPTAINER" --pysam-image "$PYSAM_IMAGE" --nextflow "$NEXTFLOW" "${VALIDATOR_BIND_ARGS[@]}" -- "${PIPELINE_ARGS[@]}" || die 'runtime validation failed'
+$PREFLIGHT_ONLY && { printf 'PASS: preflight-only mode completed; Nextflow was not launched\n'; exit 0; }
 "$NEXTFLOW" run "$PROJECT_DIR/main.nf" -profile "$PROFILE" -ansi-log false -with-apptainer -work-dir "$WORK_DIR" -with-trace "$TRACE_FILE" -with-report "$RESULTS_DIR/pipeline_report-$JOB_ID.html" -with-timeline "$RESULTS_DIR/pipeline_timeline-$JOB_ID.html" -with-dag "$RESULTS_DIR/pipeline_dag-$JOB_ID.html" -resume --samplesheet "$SAMPLESHEET" --outdir "$RESULTS_DIR" --sra_dir "$SRA_DIR" --reference_downloads "$REFERENCE_DOWNLOADS" --container_cache "$CONTAINER_CACHE" --pysam_image "$PYSAM_IMAGE" --ensembl_pep "$ENSEMBL_PEP" --go_obo "$REFERENCE_DOWNLOADS/go-basic.obo" --go_gaf "$REFERENCE_DOWNLOADS/goa_human.gaf.gz" "${PIPELINE_ARGS[@]}"

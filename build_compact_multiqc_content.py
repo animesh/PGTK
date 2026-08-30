@@ -7,6 +7,7 @@ import math
 import re
 from collections import defaultdict
 from pathlib import Path
+from report_legend import HTML_LEGEND
 
 
 def rows(path):
@@ -43,7 +44,7 @@ def emit(output_dir, identifier, title, data, description, ylab, ymax=None):
     payload = {
         "id": identifier,
         "section_name": title,
-        "description": description,
+        "description": "Colors distinguish categories only; color intensity is not confidence. " + description,
         "plot_type": "bargraph",
         "pconfig": config,
         "data": data,

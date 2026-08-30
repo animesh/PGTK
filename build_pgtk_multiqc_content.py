@@ -4,6 +4,7 @@ import csv
 import html
 import json
 from pathlib import Path
+from report_legend import HTML_LEGEND
 
 
 def rows(path):
@@ -27,7 +28,7 @@ def write_json(output_dir, identifier, title, description, data, plot_type="barg
     payload = {
         "id": identifier,
         "section_name": title,
-        "description": description,
+        "description": "Colors distinguish categories only; color intensity is not confidence. " + description,
         "plot_type": plot_type,
         "pconfig": {"id": identifier, "title": title, **(pconfig or {})},
         "data": data,
@@ -296,7 +297,7 @@ def main():
     if args.maxquant_enabled == "true":
         reports.append(("MaxQuant validation", "../proteogenomics_validation/"))
 
-    body = (
+    body = (HTML_LEGEND + 
         "<div class=\"alert alert-info\"><strong>Interpretation:</strong> RNA-observed events are exploratory evidence and are not DNA-confirmed somatic mutations.</div>"
         "<p>This lightweight dashboard contains summaries only. Full reports remain separate files.</p><ul>"
         + "".join(f'<li><a href="{link}">{html.escape(title)}</a></li>' for title, link in reports)
