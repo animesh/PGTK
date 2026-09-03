@@ -1,26 +1,202 @@
-# PGTK Minimal Production Pipeline
+# PGTK Production Pipeline
 
-PGTK is a production-oriented Nextflow DSL2 workflow for RNA-seq quality control, alignment, expression analysis, RNA-observed variant calling, fusion and splice analysis, longitudinal progression comparison, GO enrichment, exploratory proteogenomic FASTA generation, IGV evidence packaging, optional Sarek comparison, optional MaxQuant evidence integration, and consolidated reporting.
+PGTK is a Nextflow DSL2 workflow for RNA-seq quality control, alignment, expression analysis, RNA-observed variant calling, fusion and splice analysis, longitudinal baseline comparison, GO enrichment, exploratory proteogenomic FASTA generation, IGV evidence review, optional external-VCF comparison, optional MaxQuant evidence integration, consolidated reporting, and exhaustive final validation.
 
-This README documents the complete source tree and the complete operating procedure from Git clone to final biological and browser-based review.
+The repository is intentionally flat. Pipeline code, helper programs, validators, tests, configuration, and documentation are stored in the repository root.
 
-## Quickstart
+## Interpretation limits
 
-Download [data](https://github.com/animesh/PGTK/blob/main/download_sra.sh)/[tools/assets](https://github.com/animesh/PGTK/blob/main/download_assets.sh) in DATA_ROOT, declare local WORK_ROOT and submit slurm job, for example:
+PGTK analyzes RNA-derived evidence. RNA-observed variants are not automatically DNA-confirmed somatic variants. RNA editing, germline variation, allele-specific expression, mapping ambiguity, transcript structure, library artifacts, and sequencing errors remain possible explanations. VEP impact describes the candidate allele, not read-validation strength.
+
+PGTK does not run Sarek or MaxQuant. Optional branches consume completed outputs from those tools. PGTK output is research evidence and is not a clinical interpretation.
+
+## Architecture
+
+The current source defines 76 unique Nextflow processes. Every process is represented in the diagrams below. Solid arrows show principal data flow. Dashed arrows show optional or reporting dependencies.
+
+### Input, QC, alignment, expression, fusion, and splice branches
+
+```mermaid
+flowchart TD
+  SS[Samplesheet and SRA archives] --> VSD[VALIDATE_SAMPLESHEET_DESIGN]
+  RA[Reference archives] --> DR[DOWNLOAD_REFERENCES]
+  VSD --> SRA[SRA_TO_FASTQ] --> CAT[CAT_FASTQ]
+  CAT --> FQR[FASTQC_RAW]
+  CAT --> TG[TRIM_GALORE] --> FQT[FASTQC_TRIMMED]
+  DR --> RI[REF_INDEX]
+  DR --> SI[STAR_INDEX]
+  TG --> SA[STAR_ALIGN]
+  SI --> SA
+  SA --> SBI[SORT_INDEX_BAM] --> SF[SAMTOOLS_FLAGSTAT]
+  SA --> AR[ARRIBA] --> VRF[VALIDATE_RNA_FUSIONS] --> FF[FUSION_FASTA]
+  SBI --> ST[STRINGTIE_ASSEMBLY] --> GC[GFFCOMPARE_NOVEL]
+  GC --> VRS[VALIDATE_RNA_SPLICE_TRANSCRIPTS] --> SPF[SPLICE_PROTEIN_FASTA]
+  SBI --> CG[COUNT_GENES_PER_SAMPLE] --> MGE[MERGE_GENE_EXPRESSION]
+  DR --> PGO[PREPARE_GO_ANNOTATIONS]
+  MGE --> ESG[ANALYZE_EXPRESSION_SAMPLE_GO]
+  MGE --> ERG[ANALYZE_EXPRESSION_RANKED_GO]
+  PGO --> ESG
+  PGO --> ERG
+  ESG --> MEG[MERGE_EXPRESSION_GO]
+  ERG --> MEG
+  MEG --> PEM[PREPARE_EXPRESSION_MULTIQC_CONTENT]
+```
+
+### Variant calling, validation, FASTA, progression, and biology
+
+```mermaid
+flowchart TD
+  SBI[SORT_INDEX_BAM] --> MD[MARK_DUPLICATES] --> SNC[SPLIT_N_CIGAR]
+  RI[REF_INDEX] --> PHI[PREPARE_HAPLOTYPE_INTERVALS]
+  SNC --> HC[HAPLOTYPE_CALLER]
+  PHI --> HC
+  HC --> VHS[VALIDATE_HAPLOTYPE_SHARDS] --> GHG[GATHER_HAPLOTYPE_GVCF]
+  GHG --> GV[GENOTYPE_VARIANTS] --> NV[NORMALIZE_VARIANTS]
+  NV --> SSN[SELECT_SNPS] --> FS[FILTER_SNPS]
+  NV --> SIN[SELECT_INDELS] --> FI[FILTER_INDELS]
+  FS --> MFV[MERGE_FILTERED_VARIANTS]
+  FI --> MFV
+  MFV --> BS[BCFTOOLS_STATS]
+  MFV --> VEP[VEP_ANNOTATE] --> VRV[VALIDATE_RNA_VARIANTS]
+  GV --> VSQ[VARIANT_STAGE_QC]
+  MFV --> VSQ
+  VRV --> VSQ
+  GV -. optional .-> CEV[COMPARE_EXTERNAL_VCF]
+  MFV -. optional .-> CEV
+  VRV -. optional .-> CEV
+  VRV --> VVC[VALIDATE_VARIANT_CODONS] --> MVC[MERGE_VARIANT_CODON_VALIDATION] --> ACM[ANALYZE_CODON_MISMATCHES]
+  VRV --> VVP[VALIDATE_VARIANT_READ_PROVENANCE] --> MVR[MERGE_VARIANT_READ_PROVENANCE]
+  VRV --> PF[PYPGATK_FASTA]
+  PF --> CPF[COMBINE_PROTEIN_FASTA]
+  FF[FUSION_FASTA] --> CPF
+  SPF[SPLICE_PROTEIN_FASTA] --> CPF
+  VRV --> PS[PROGRESSION_SUBTRACT]
+  PGO[PREPARE_GO_ANNOTATIONS] --> AVL[ANALYZE_VARIANT_LANDSCAPE]
+  GV --> AVL
+  MFV --> AVL
+  VEP --> AVL
+  VRV --> AVL
+  PS --> AVL
+  PS --> APS[ANALYZE_PROGRESSION_SAMPLE]
+  PGO --> APS
+  APS --> APVS[ANALYZE_PROGRESSION_VARIANT_SETS]
+  APS --> CPP[COMPARE_PROGRESSION_PAIR]
+  APS --> MPB[MERGE_PROGRESSION_BIOLOGY]
+  CPP --> MPB
+```
+
+### IGV, reports, optional proteogenomics, MultiQC, and acceptance
+
+```mermaid
+flowchart TD
+  VRV[VALIDATE_RNA_VARIANTS] --> BIE[BUILD_IGV_EVIDENCE_BUNDLE]
+  PS[PROGRESSION_SUBTRACT] --> BIE
+  VRF[VALIDATE_RNA_FUSIONS] --> BIE
+  VRS[VALIDATE_RNA_SPLICE_TRANSCRIPTS] --> BIE
+  BIE --> BFR[BUILD_FINDING_IGV_REVIEWS] --> BFE[BUILD_FINDING_EXPLORER]
+  QCF[QC inputs] --> MQC[MULTIQC_QC_DATA]
+  INV[Variant, FASTA, RNA and progression inputs] --> BCA[BUILD_COMPARATIVE_ADVANTAGE_REPORT]
+  MQC --> BCF[BUILD_COMPLETE_FINDINGS_REPORT]
+  BCA --> PCM[PREPARE_COMPARATIVE_MULTIQC_CONTENT]
+  BCF --> PCM
+
+  CPF[COMBINE_PROTEIN_FASTA] -. optional .-> VMI[VALIDATE_MAXQUANT_INPUTS]
+  VMI --> MMP[MAP_MAXQUANT_PEPTIDES]
+  MMP --> AMV[ANNOTATE_MAXQUANT_VARIANTS]
+  VMI --> AMJ[ANALYZE_MAXQUANT_JUNCTIONS]
+  AMJ --> VMS[VALIDATE_MAXQUANT_SPLICE_JUNCTIONS]
+  AMV --> BPE[BUILD_PROTEOGENOMICS_EVIDENCE_REPORT]
+  VMS --> BPE
+  BPE --> BIV[BUILD_INTEGRATED_VARIANT_EVIDENCE]
+  ACM[ANALYZE_CODON_MISMATCHES] --> BIV
+  BPE --> VPR[VALIDATE_PROTEOGENOMIC_READS]
+
+  PCM --> PFM[PREPARE_FINAL_MULTIQC_CONTENT]
+  PEM[PREPARE_EXPRESSION_MULTIQC_CONTENT] --> PFM
+  BPE -. optional .-> PFM
+  BFE --> PRC[PREPARE_RESULTS_CATALOGUE]
+  PFM --> MF[MULTIQC_FINAL]
+  PRC --> MF
+  MF --> VPRR[VALIDATE_PUBLISHED_RESULTS]
+  VPRR --> PASS[Accepted run]
+```
+
+`VALIDATE_SAMPLESHEET_DESIGN` runs before sample processing. `VALIDATE_PUBLISHED_RESULTS` runs after `MULTIQC_FINAL`, uses `errorStrategy 'terminate'`, and determines final workflow acceptance.
+
+## Samplesheet
+
+Required columns are `sample` and `srr`. `TK`, `Group`, and `baseline` are supported metadata.
+
+```csv
+sample,srr,TK,Group,baseline
+SAMPLE_A,SRR000001,SUBJECT_1,baseline_group,true
+SAMPLE_B,SRR000002,SUBJECT_1,followup_group,false
+```
+
+Rules:
+
+- `sample` and `srr` must be non-empty and unique.
+- `TK` is the subject identifier and defaults to `sample`.
+- `Group` is descriptive metadata and defaults to `sample`.
+- `baseline` must be `true` or `false`.
+- Exactly one baseline per `TK` enables subtraction.
+- No baseline is reported as `SKIPPED_NO_BASELINE`.
+- Multiple baselines for one `TK` terminate the workflow.
+- Per-sample protein FASTAs are never baseline-subtracted.
+
+The normalized design report is published to `results/qc/samplesheet/samplesheet_design.tsv`.
+
+## Saga quick start
+
+Download scripts require internet access. Run them directly on a Saga login node, never through Slurm compute nodes.
 
 ```bash
 git clone https://github.com/animesh/PGTK
 cd PGTK
-bash download_sra.sh
 bash download_assets.sh
+bash download_sra.sh
+```
+
+Declare runtime values:
+
+```bash
 DATA_ROOT=$PWD
-WORK_ROOT=/cluster/work/users/ash022
-JOB_ID=$(sbatch --parsable \
-  --account=nn9036k \
+WORK_ROOT=$WORK
+PYTHON_PATH=/cluster/software/Mamba/4.14.0-0/bin/python3
+APPTAINER_PATH=/usr/bin/apptainer
+SLURM_ACCOUNT=nn9036k
+NF_PATH=/cluster/home/ash022/bin/nextflow
+PART_NORM=normal
+PART_BIG=bigmem
+module load Java/21.0.2
+```
+
+Validate the source with the real Saga executables:
+
+```bash
+bash validate_pipeline_commands.sh \
+  --project-dir "$PWD" \
+  --nextflow "$NF_PATH" \
+  --python "$PYTHON_PATH"
+```
+
+Required ending:
+
+```text
+FAIL: 0
+RESULT: PASSED
+```
+
+## Preflight-only submission
+
+```bash
+PREFLIGHT_JOB_ID=$(sbatch --parsable \
+  --account="$SLURM_ACCOUNT" \
   scratch.slurm \
-  --account nn9036k \
-  --normal-partition normal \
-  --bigmem-partition bigmem \
+  --preflight-only \
+  --account "$SLURM_ACCOUNT" \
+  --normal-partition "$PART_NORM" \
+  --bigmem-partition "$PART_BIG" \
   --project-dir "$PWD" \
   --work-dir "$WORK_ROOT/pgtk-work" \
   --results-dir "$DATA_ROOT/results" \
@@ -32,640 +208,225 @@ JOB_ID=$(sbatch --parsable \
   --samplesheet "$DATA_ROOT/samples.csv" \
   --ensembl-pep "$DATA_ROOT/reference_downloads/Homo_sapiens.GRCh38.pep.all.fa.gz" \
   --pysam-image "$DATA_ROOT/singularity_cache/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img" \
-  --nextflow /cluster/home/ash022/bin/nextflow \
-  --python /cluster/software/Mamba/4.14.0-0/bin/python3 \
-  --apptainer /usr/bin/apptainer \
+  --nextflow "$NF_PATH" \
+  --python "$PYTHON_PATH" \
+  --apptainer "$APPTAINER_PATH" \
+  --java-module Java/21.0.2 \
   --slurm-log-template "$PWD/pgtk-wrapper-{job_id}.log" \
   --)
-printf '%s\n' "$JOB_ID" | tee .pgtk_current_job_id
-echo "JOB_ID=$JOB_ID"
-tail -f pgtk-wrapper-${JOB_ID}.log 
-python3 tests/validate_published_findings.py   "$RESULTS/igv/findings/finding_explorer/partitions/all.jsonl.gz"   2>&1 | tee "$RESULTS/published_findings_validation-${JOB_ID}.log"
-#published finding validation: PASS (157508 records)
-```
-
-## Interpretation limits
-
-PGTK analyzes RNA-derived evidence. RNA-observed variants are not automatically DNA-confirmed somatic variants. RNA editing, allele-specific expression, germline variation, mapping ambiguity, transcript structure, library artifacts, and sequencing errors remain possible explanations. Predicted VEP impact describes the candidate allele and must not be interpreted as read-validation status.
-
-PGTK does not execute Sarek or MaxQuant. Optional integration branches consume existing outputs from those tools.
-
-## Validated production environment
-
-```text
-Workflow language: Nextflow DSL2
-Nextflow reference version: 26.04.6
-Scheduler: Slurm
-Container runtime: Apptainer 1.4.4
-Reference assembly: GRCh38
-Ensembl release: 111
-VEP cache: release 111, GRCh38
-Pinned containers: 18
-Required downloaded reference assets: 8
-Processes in the current reference source: 74, discovered dynamically
-```
-
-Source and process counts are reported dynamically. They are not enforced as fixed constants.
-
-## Pipeline architecture
-
-```mermaid
-flowchart TD
-    SS[Samplesheet] --> SRA[SRA archives]
-    SRA --> FQ[SRA_TO_FASTQ and CAT_FASTQ]
-    FQ --> QCR[FASTQC_RAW]
-    FQ --> TRIM[TRIM_GALORE]
-    TRIM --> QCT[FASTQC_TRIMMED]
-
-    REF[GRCh38, Ensembl 111, VEP, Arriba, GO] --> DREF[DOWNLOAD_REFERENCES]
-    DREF --> RIDX[REF_INDEX]
-    DREF --> SIDX[STAR_INDEX]
-    RIDX --> HINT[PREPARE_HAPLOTYPE_INTERVALS]
-
-    TRIM --> STAR[STAR_ALIGN]
-    SIDX --> STAR
-    STAR --> BAM[SORT_INDEX_BAM]
-    STAR --> ARR[ARRIBA]
-    STAR --> FC[COUNT_GENES_PER_SAMPLE]
-    STAR --> ST[STRINGTIE_ASSEMBLY]
-
-    BAM --> FLAG[SAMTOOLS_FLAGSTAT]
-    BAM --> MD[MARK_DUPLICATES]
-    MD --> SNC[SPLIT_N_CIGAR]
-    SNC --> HC[HAPLOTYPE_CALLER shards]
-    HINT --> HC
-    HC --> VHS[VALIDATE_HAPLOTYPE_SHARDS]
-    VHS --> GG[GATHER_HAPLOTYPE_GVCF]
-    GG --> GT[GENOTYPE_VARIANTS]
-    GT --> RAW[Raw GenotypeGVCFs VCF and index]
-    GT --> NORM[NORMALIZE_VARIANTS]
-    NORM --> SSNP[SELECT_SNPS]
-    NORM --> SINDEL[SELECT_INDELS]
-    SSNP --> FSNP[FILTER_SNPS]
-    SINDEL --> FINDEL[FILTER_INDELS]
-    FSNP --> MERGE[MERGE_FILTERED_VARIANTS]
-    FINDEL --> MERGE
-    MERGE --> VSTAGE[VARIANT_STAGE_QC]
-    MERGE --> BSTATS[BCFTOOLS_STATS]
-    MERGE --> VEP[VEP_ANNOTATE]
-    VEP --> RV[VALIDATE_RNA_VARIANTS]
-    BAM --> RV
-    RV --> CODON[VALIDATE_VARIANT_CODONS]
-    RV --> PROV[VALIDATE_VARIANT_READ_PROVENANCE]
-    CODON --> MCODON[MERGE_VARIANT_CODON_VALIDATION]
-    PROV --> MPROV[MERGE_VARIANT_READ_PROVENANCE]
-    MCODON --> CM[ANALYZE_CODON_MISMATCHES]
-    VEP --> VFA[PYPGATK_FASTA]
-
-    ARR --> RFUS[VALIDATE_RNA_FUSIONS]
-    RFUS --> FFA[FUSION_FASTA]
-    ST --> GFF[GFFCOMPARE_NOVEL]
-    GFF --> RSPL[VALIDATE_RNA_SPLICE_TRANSCRIPTS]
-    RSPL --> SFA[SPLICE_PROTEIN_FASTA]
-    VFA --> CFA[COMBINE_PROTEIN_FASTA]
-    FFA --> CFA
-    SFA --> CFA
-
-    FC --> EXPR[MERGE_GENE_EXPRESSION]
-    EXPR --> EGO[ANALYZE_EXPRESSION_SAMPLE_GO]
-    EXPR --> ERGO[ANALYZE_EXPRESSION_RANKED_GO]
-    EGO --> MEGO[MERGE_EXPRESSION_GO]
-    ERGO --> MEGO
-
-    RV --> SUB[PROGRESSION_SUBTRACT]
-    SUB --> PS[ANALYZE_PROGRESSION_SAMPLE]
-    SUB --> PSETS[ANALYZE_PROGRESSION_VARIANT_SETS]
-    PS --> PPAIR[COMPARE_PROGRESSION_PAIR]
-    PS --> PMERGE[MERGE_PROGRESSION_BIOLOGY]
-    PSETS --> PMERGE
-    PPAIR --> PMERGE
-    VEP --> LAND[ANALYZE_VARIANT_LANDSCAPE]
-
-    RV --> IGVB[BUILD_IGV_EVIDENCE_BUNDLE]
-    RFUS --> IGVB
-    RSPL --> IGVB
-    SUB --> IGVB
-    IGVB --> REV[BUILD_FINDING_IGV_REVIEWS]
-    REV --> EXP[BUILD_FINDING_EXPLORER]
-
-    SAREK[Existing Sarek VCFs] -. optional .-> EXT[COMPARE_EXTERNAL_VCF]
-    RAW --> EXT
-    MERGE --> EXT
-    RV --> EXT
-
-    MQ[Existing MaxQuant outputs] -. optional .-> MQV[VALIDATE_MAXQUANT_INPUTS]
-    CFA --> MQMAP[MAP_MAXQUANT_PEPTIDES]
-    MQV --> MQMAP
-    MQMAP --> MQANN[ANNOTATE_MAXQUANT_VARIANTS]
-    MQMAP --> MQJ[ANALYZE_MAXQUANT_JUNCTIONS]
-    MQJ --> MQSJ[VALIDATE_MAXQUANT_SPLICE_JUNCTIONS]
-    MQMAP --> MQR[VALIDATE_PROTEOGENOMIC_READS]
-    MQANN --> MQREP[BUILD_PROTEOGENOMICS_EVIDENCE_REPORT]
-    MQSJ --> MQREP
-    MQR --> MQREP
-    MQREP --> INT[BUILD_INTEGRATED_VARIANT_EVIDENCE]
-
-    VSTAGE --> CREP[BUILD_COMPLETE_FINDINGS_REPORT]
-    PMERGE --> CREP
-    LAND --> CREP
-    MEGO --> CREP
-    REV --> CREP
-    CREP --> ADV[BUILD_COMPARATIVE_ADVANTAGE_REPORT]
-    EXT --> ADV
-    INT --> ADV
-    CREP --> MQC[PREPARE_FINAL_MULTIQC_CONTENT]
-    ADV --> MQC
-    EXP --> CAT[PREPARE_RESULTS_CATALOGUE]
-    MQC --> CAT
-    CAT --> FINAL[MULTIQC_FINAL]
-```
-
-## Core thresholds and defaults
-
-All values can be overridden through Nextflow parameters unless noted otherwise.
-
-### Variant calling and hard filters
-
-| Parameter | Default | Meaning |
-|---|---:|---|
-| `haplotype_scatter_count` | 24 | HaplotypeCaller shards per sample. |
-| `hc_calling_confidence` | 20 | GATK calling-confidence threshold. |
-| `hc_dont_use_soft_clipped_bases` | true | Excludes soft-clipped bases from calling. |
-| `hc_pcr_indel_model` | `CONSERVATIVE` | GATK PCR indel model. |
-| `snp_filter_qd` | 2.0 | SNP QD lower threshold. |
-| `snp_filter_fs` | 60.0 | SNP Fisher strand upper threshold. |
-| `snp_filter_sor` | 3.0 | SNP SOR upper threshold. |
-| `snp_filter_mq` | 40.0 | SNP mapping-quality lower threshold. |
-| `snp_filter_mq_rank_sum` | -12.5 | SNP MQRankSum lower threshold. |
-| `snp_filter_read_pos_rank_sum` | -8.0 | SNP ReadPosRankSum lower threshold. |
-| `indel_filter_qd` | 2.0 | Indel QD lower threshold. |
-| `indel_filter_fs` | 200.0 | Indel Fisher strand upper threshold. |
-| `indel_filter_sor` | 10.0 | Indel SOR upper threshold. |
-| `indel_filter_read_pos_rank_sum` | -20.0 | Indel ReadPosRankSum lower threshold. |
-
-### RNA evidence and codons
-
-| Parameter | Default | Meaning |
-|---|---:|---|
-| `rna_variant_min_depth` | 10 | Minimum RNA depth for a validated variant row. |
-| `rna_variant_min_alt_reads` | 3 | Minimum exact ALT-supporting reads. |
-| `rna_variant_min_alt_fraction` | 0.05 | Minimum ALT fraction among callable reads. |
-| `rna_fusion_min_split_reads` | 1 | Minimum split-read support. |
-| `rna_fusion_min_total_support` | 2 | Minimum split plus discordant support. |
-| `read_validation_padding` | 150 bp | Read-validation locus padding. |
-| Codon/read base quality | 20 | Default minimum base quality. |
-| Codon/read mapping quality | 20 | Default minimum mapping quality. |
-
-### Splice and fusion FASTAs
-
-| Parameter | Default | Meaning |
-|---|---:|---|
-| `fusion_flank_aa` | 50 aa | Protein sequence retained around a fusion breakpoint. |
-| `splice_min_coverage` | 2.5 | StringTie transcript coverage threshold. |
-| `splice_min_junction_reads` | 3 | Minimum junction-read support. |
-| `splice_min_isoform_fraction` | 0.05 | Minimum isoform fraction. |
-| `splice_min_protein_aa` | 60 aa | Minimum translated splice-protein length. |
-| `splice_class_codes` | `j,u` | GffCompare classes retained for novel splice processing. |
-
-### Finding review and IGV
-
-| Parameter | Default | Meaning |
-|---|---:|---|
-| `finding_review_mapq` | 20 | Minimum mapping quality for callable finding evidence. |
-| `finding_review_baseq` | 20 | Minimum base quality for callable finding evidence. |
-| `finding_review_reference_reads` | 20 | Reference-read display cap used by review generation. |
-| `finding_classes` | RNA variant, progression variant, fusion, splice junction | Included candidate classes. |
-| `finding_priority_mode` | `all` | Default priority selection mode. |
-| `generate_priority_igv_reports` | true | Generates selected IGV reports. |
-| `igv_report_max_reads` | 100 | Maximum reads passed to each report. |
-| `igv_report_max_file_size_mb` | 64 MB | Per-report input-size protection. |
-| `igv_report_timeout_seconds` | 600 s | Report-generation timeout. |
-
-### GO and expression
-
-| Parameter | Default | Meaning |
-|---|---:|---|
-| `go_min_size` | 10 | Minimum GO set size. |
-| `go_max_size` | 500 | Maximum GO set size. |
-| `go_fdr_threshold` | 0.1 | FDR threshold used for GO reporting. |
-| `go_namespaces` | `all` | GO namespaces included. |
-| `gene_count_feature_type` | `exon` | FeatureCounts feature type. |
-| `gene_count_id_attribute` | `gene_id` | GTF identifier attribute. |
-| `gene_count_strand` | 0 | Unstranded counting. |
-| `gene_count_exclude_chimeric` | true | Excludes chimeric alignments. |
-| `gene_count_primary_only` | true | Counts primary alignments only. |
-| `gene_count_allow_multi_overlap` | false | Disallows multi-overlap assignment. |
-| `gene_count_count_multimapping` | false | Excludes multimapping reads. |
-| `expression_pseudocount` | 0.5 | Fold-change pseudocount. |
-| `expression_cpm_threshold` | 1.0 | Expression CPM threshold. |
-| `expression_tpm_threshold` | 0.0 | Expression TPM threshold. |
-| `expression_rank_metric` | `log2_tpm_fold_change` | Metric for ranked GO analysis. |
-| `expression_rank_min_nonzero_scores` | 1 | Minimum non-zero ranked scores. |
-
-## Repository file guide
-
-### Orchestration and configuration
-
-| File | Purpose |
-|---|---|
-| `main.nf` | Complete 74-process DSL2 workflow, parameter defaults, process definitions, channel wiring, optional branches, publication, and report assembly. |
-| `nextflow.config` | Slurm executor, Apptainer settings, queue routing, retries, per-process resources, and trace/report/timeline/DAG configuration. |
-| `scratch.slurm` | Production wrapper. Resolves physical paths, builds the explicit bind contract, runs source and exact-container preflight, launches Nextflow with `-resume`, and writes failure/resource reports. |
-| `run.sh` | Lightweight direct Nextflow launcher for non-production use. |
-| `samples.csv` | Samplesheet with sample, SRA accession, subject, group, and baseline. |
-| `multiqc_config.yaml` | MultiQC custom-content behavior and dashboard presentation. |
-| `pipeline_required_files.txt` | Authoritative required-source manifest. |
-| `PIPELINE_VALIDATION_SEMANTICS.md` | Definitions for validation states and evidence interpretation. |
-| `VALIDATION_REPORT.md` | Recorded source and runtime validation scope. |
-| `FILE_MANIFEST.tsv` | File sizes and SHA-256 values for the packaged source tree. |
-| `.gitattributes` | Git file-attribute configuration. |
-| `.gitignore` | Excludes generated work, results, assets, logs, and caches. |
-| `.github/workflows/jekyll-gh-pages.yml` | GitHub Pages publication workflow. |
-| `LICENSE` | Repository license. |
-
-### Acquisition and environment validation
-
-| File | Purpose |
-|---|---|
-| `download_assets.sh` | Downloads and checks the 18 pinned images and eight required reference assets. Run on a login node. |
-| `download_sra.sh` | Downloads samplesheet SRA archives and validates each with `vdb-validate`. Run on a login node. |
-| `validate_pipeline_commands.sh` | Dynamic source manifest, duplicate process, syntax, portability, wiring, Pysam contract, and `nextflow inspect` validation. |
-| `validate_runtime_inputs.py` | Exact runtime check for directories, references, images, container executables, container-visible scripts, SRA archives, and optional inputs. |
-| `tests/test_semantics.py` | SNV, MNV, insertion, deletion, and undefined-fraction semantic regressions. |
-| `tests/test_container_bindings.py` | Regression test that explicit bind arguments are passed to container execution. |
-| `tests/validate_published_findings.py` | Whole-explorer count, status, and undefined-fraction validator. |
-| `collect_pipeline_failures.py` | Per-run failure ledger and cumulative history from trace, logs, attempts, and exit code. |
-| `analyze_pipeline_trace.py` | Runtime, CPU, memory, retry, and efficiency summaries. |
-
-### Variant and RNA evidence
-
-| File | Purpose |
-|---|---|
-| `variant_read_evidence.py` | Shared normalized SNV, MNV, insertion, deletion, callable-reference, and exclusion classifier. |
-| `validate_haplotype_shards.py` | Confirms every expected scattered GVCF shard is present and valid. |
-| `summarize_variant_stages.py` | Counts raw, normalized, hard-filtered, PASS, VEP, and RNA-validated stages. |
-| `validate_rna_events.py` | Sample-matched variant, fusion, and splice RNA support validation. |
-| `validate_variant_codons.py` | Reference, VEP consequence, codon translation, and read-evidence validation. |
-| `validate_variant_read_provenance.py` | ALT, clean-reference, excluded-read, callable-depth, MAPQ, base-quality, and ALT-fraction provenance. |
-| `merge_variant_validation.py` | Consolidates per-sample validation tables. |
-| `analyze_codon_mismatches.py` | Classifies and summarizes reference, alternate, transcript, and translation disagreements. |
-| `build_integrated_variant_evidence.py` | Integrates variant, RNA, codon, provenance, and optional peptide evidence. |
-| `compare_external_vcf.py` | Optional Sarek/external VCF comparison against raw, PASS, and RNA-validated PGTK stages. |
-| `external_comparison.none.tsv` | Schema-valid sentinel used when external comparison is disabled. |
-
-### Expression, progression, and GO
-
-| File | Purpose |
-|---|---|
-| `prepare_go_annotations.py` | Converts OBO and GAF inputs into normalized annotation tables. |
-| `expression_go_analysis.py` | Expression ORA and ranked GO analysis. |
-| `analyze_progression_biology.py` | Per-sample progression allele, gene, and GO summaries. |
-| `compare_progression_pair.py` | Pairwise non-baseline progression comparisons within subjects. |
-| `merge_progression_biology.py` | Consolidates per-sample, pairwise, and set-level progression results. |
-| `analyze_variant_landscape.py` | Variant classes, consequences, genes, and variant-associated GO summaries. |
-
-### Proteogenomics and MaxQuant
-
-| File | Purpose |
-|---|---|
-| `map_peptides_to_fasta.py` | Maps MaxQuant peptides to PGTK proteins, canonical FASTAs, and contaminants. |
-| `annotate_variant_peptides.py` | Links peptides to variants, altered residues, annotations, and reference-proteome checks. |
-| `analyze_chimeric_splice_peptides.py` | Fusion and novel-splice peptide classification. |
-| `validate_splice_junction_peptides.py` | Sequence-level splice-junction peptide validation. |
-| `validate_proteogenomic_reads.py` | Pysam-based read validation for peptide-linked genomic and transcript events. |
-| `proteogenomics_evidence_report.py` | Integrated optional MaxQuant evidence report. |
-| `maxquant_raw_file_map.none.tsv` | Schema-valid sentinel when no explicit raw-file map is supplied. |
-
-### IGV, findings, dashboards, and reports
-
-| File | Purpose |
-|---|---|
-| `build_igv_evidence_bundle.py` | BED/BEDPE coordinates, indexed event BAMs, IGV batches, sessions, and event-to-sample manifests. |
-| `build_finding_igv_reviews.py` | Consolidates findings and builds exact-ALT, clean-reference, overlap, and browser-safe display BAMs. |
-| `build_finding_explorer.py` | Portable database-free explorer, partitioned data, strict count invariants, and on-demand report server. |
-| `serve_finding_explorer.sh` | Validates explorer resources and runs the generated server inside the IGV-reports image. |
-| `report_legend.py` | Shared evidence and visualization legends. |
-| `build_compact_multiqc_content.py` | Optional-branch and compact evidence sections. |
-| `build_expression_multiqc_content.py` | Expression and GO dashboard sections. |
-| `build_pgtk_multiqc_content.py` | Main variant, progression, priority-candidate, and navigation sections. |
-| `build_results_catalogue.py` | Discovers published results and produces documented result-family links. |
-| `build_complete_report.py` | Complete cross-branch findings report. |
-| `build_comparative_advantage_report.py` | Comparative interpretation report with branch availability. |
-
-## Complete operating procedure
-
-### 1. Clone or enter the source checkout
-
-```bash
-export PGTK_INSTALL_PARENT="${PGTK_INSTALL_PARENT:?Set the installation parent directory}"
-export PGTK_REPOSITORY_URL="${PGTK_REPOSITORY_URL:?Set the repository URL}"
-export PGTK_SOURCE_NAME="${PGTK_SOURCE_NAME:-PGTK}"
-
-cd "$PGTK_INSTALL_PARENT"
-git clone "$PGTK_REPOSITORY_URL" "$PGTK_SOURCE_NAME"
-cd "$PGTK_SOURCE_NAME"
-export PGTK_PROJECT_DIR="$(pwd -P)"
-```
-
-### 2. Configure runtime roots
-
-```bash
-export PGTK_DATA_ROOT="${PGTK_DATA_ROOT:?Set shared assets and results root}"
-export PGTK_WORK_ROOT="${PGTK_WORK_ROOT:?Set writable work root}"
-
-export PGTK_WORK_DIR="${PGTK_WORK_DIR:-$PGTK_WORK_ROOT/pgtk-work}"
-export PGTK_TMP_ROOT="${PGTK_TMP_ROOT:-$PGTK_WORK_ROOT/pgtk-tmp}"
-export PGTK_RESULTS_DIR="${PGTK_RESULTS_DIR:-$PGTK_DATA_ROOT/results}"
-export PGTK_REFERENCE_DOWNLOADS="${PGTK_REFERENCE_DOWNLOADS:-$PGTK_DATA_ROOT/reference_downloads}"
-export PGTK_CONTAINER_CACHE="${PGTK_CONTAINER_CACHE:-$PGTK_DATA_ROOT/singularity_cache}"
-export PGTK_SRA_DIR="${PGTK_SRA_DIR:-$PGTK_DATA_ROOT/sra_cache}"
-export PGTK_NXF_HOME="${PGTK_NXF_HOME:-$PGTK_DATA_ROOT/.nextflow_home}"
-export PGTK_SAMPLESHEET="${PGTK_SAMPLESHEET:-$PGTK_DATA_ROOT/samples.csv}"
-
-export PGTK_NEXTFLOW="${PGTK_NEXTFLOW:-$(command -v nextflow)}"
-export PGTK_PYTHON="${PGTK_PYTHON:-$(command -v python3)}"
-export PGTK_APPTAINER="${PGTK_APPTAINER:-$(command -v apptainer)}"
-export PGTK_PYSAM_IMAGE="${PGTK_PYSAM_IMAGE:-$PGTK_CONTAINER_CACHE/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img}"
-export PGTK_ENSEMBL_PEP="${PGTK_ENSEMBL_PEP:-$PGTK_REFERENCE_DOWNLOADS/Homo_sapiens.GRCh38.pep.all.fa.gz}"
-
-export PGTK_ACCOUNT="${PGTK_ACCOUNT:?Set Slurm account}"
-export PGTK_NORMAL_PARTITION="${PGTK_NORMAL_PARTITION:?Set normal partition}"
-export PGTK_BIGMEM_PARTITION="${PGTK_BIGMEM_PARTITION:?Set big-memory partition}"
-export PGTK_SLURM_LOG_TEMPLATE="${PGTK_SLURM_LOG_TEMPLATE:-$PGTK_PROJECT_DIR/pgtk-wrapper-{job_id}.log}"
-```
-
-### 3. Configure and check the samplesheet
-
-Use:
-
-```csv
-sample,srr,TK,Group,baseline
-SAMPLE_A,SRR000001,SUBJECT_1,baseline_group,true
-SAMPLE_B,SRR000002,SUBJECT_1,followup_group,false
-```
-
-Exactly one baseline enables subtraction for a subject. No baseline is reported and skipped. Multiple baselines are an error. Per-sample FASTAs remain independent from subtraction.
-
-### 4. Download assets and SRA archives
-
-Run on a login node, never on an internet-restricted compute node:
-
-```bash
-cd "$PGTK_PROJECT_DIR"
-bash download_assets.sh "$PGTK_PROJECT_DIR" 2>&1 | tee "download_assets_$(date +%Y%m%d_%H%M%S).log"
-bash download_sra.sh "$PGTK_PROJECT_DIR" 2>&1 | tee "download_sra_$(date +%Y%m%d_%H%M%S).log"
-```
-
-Verify generated checksum files and `vdb-validate` results.
-
-### 5. Preserve resume history when changing checkout
-
-A work directory alone does not enable resume. Copy the previous `.nextflow` metadata:
-
-```bash
-export PGTK_PREVIOUS_PROJECT="${PGTK_PREVIOUS_PROJECT:?Set previous source checkout}"
-
-test -d "$PGTK_PREVIOUS_PROJECT/.nextflow"
-test -d "$PGTK_WORK_DIR"
-mkdir -p "$PGTK_PROJECT_DIR/.nextflow"
-rsync -a "$PGTK_PREVIOUS_PROJECT/.nextflow/" "$PGTK_PROJECT_DIR/.nextflow/"
-
-cd "$PGTK_PROJECT_DIR"
-"$PGTK_NEXTFLOW" log | tail -20
-```
-
-If Nextflow says `Option -resume is ignored`, stop the job and restore the correct history. Do not run `nextflow clean`.
-
-### 6. Validate source
-
-```bash
-cd "$PGTK_PROJECT_DIR"
-python3 tests/test_semantics.py
-python3 tests/test_container_bindings.py
-bash validate_pipeline_commands.sh \
-  --project-dir "$PGTK_PROJECT_DIR" \
-  --nextflow "$PGTK_NEXTFLOW" \
-  --python "$PGTK_PYTHON"
+printf '%s\n' "$PREFLIGHT_JOB_ID" | tee .pgtk_current_preflight_job_id
+tail -F "pgtk-wrapper-${PREFLIGHT_JOB_ID}.log"
 ```
 
 Required ending:
 
 ```text
-PASS  Shared explicit Apptainer bind contract wired
-PASS  Runtime container visibility validation wired
-FAIL: 0
-RESULT: PASSED
-```
-
-### 7. Run exact preflight-only job
-
-```bash
-cd "$PGTK_PROJECT_DIR"
-PREFLIGHT_JOB=$(sbatch --parsable \
-  --account="$PGTK_ACCOUNT" \
-  scratch.slurm \
-  --preflight-only \
-  --account "$PGTK_ACCOUNT" \
-  --normal-partition "$PGTK_NORMAL_PARTITION" \
-  --bigmem-partition "$PGTK_BIGMEM_PARTITION" \
-  --project-dir "$PGTK_PROJECT_DIR" \
-  --work-dir "$PGTK_WORK_DIR" \
-  --results-dir "$PGTK_RESULTS_DIR" \
-  --reference-downloads "$PGTK_REFERENCE_DOWNLOADS" \
-  --container-cache "$PGTK_CONTAINER_CACHE" \
-  --sra-dir "$PGTK_SRA_DIR" \
-  --tmp-root "$PGTK_TMP_ROOT" \
-  --nxf-home "$PGTK_NXF_HOME" \
-  --samplesheet "$PGTK_SAMPLESHEET" \
-  --ensembl-pep "$PGTK_ENSEMBL_PEP" \
-  --pysam-image "$PGTK_PYSAM_IMAGE" \
-  --nextflow "$PGTK_NEXTFLOW" \
-  --python "$PGTK_PYTHON" \
-  --apptainer "$PGTK_APPTAINER" \
-  --slurm-log-template "$PGTK_SLURM_LOG_TEMPLATE" \
-  -- \
-  --run_external_vcf_comparison false \
-  --run_proteogenomic_validation false
-)
-```
-
-Required ending:
-
-```text
-PASS  Pysam container: configured paths visible
 PASS: COMPLETE PRE-SUBMISSION RUNTIME VALIDATION
 PASS: preflight-only mode completed; Nextflow was not launched
 ```
 
-### 8. Submit production run
+## Production submission and resume
 
-Use the same command without `--preflight-only`:
+`scratch.slurm` always launches Nextflow with `-resume`.
 
 ```bash
 JOB_ID=$(sbatch --parsable \
-  --account="$PGTK_ACCOUNT" \
+  --account="$SLURM_ACCOUNT" \
   scratch.slurm \
-  --account "$PGTK_ACCOUNT" \
-  --normal-partition "$PGTK_NORMAL_PARTITION" \
-  --bigmem-partition "$PGTK_BIGMEM_PARTITION" \
-  --project-dir "$PGTK_PROJECT_DIR" \
-  --work-dir "$PGTK_WORK_DIR" \
-  --results-dir "$PGTK_RESULTS_DIR" \
-  --reference-downloads "$PGTK_REFERENCE_DOWNLOADS" \
-  --container-cache "$PGTK_CONTAINER_CACHE" \
-  --sra-dir "$PGTK_SRA_DIR" \
-  --tmp-root "$PGTK_TMP_ROOT" \
-  --nxf-home "$PGTK_NXF_HOME" \
-  --samplesheet "$PGTK_SAMPLESHEET" \
-  --ensembl-pep "$PGTK_ENSEMBL_PEP" \
-  --pysam-image "$PGTK_PYSAM_IMAGE" \
-  --nextflow "$PGTK_NEXTFLOW" \
-  --python "$PGTK_PYTHON" \
-  --apptainer "$PGTK_APPTAINER" \
-  --slurm-log-template "$PGTK_SLURM_LOG_TEMPLATE" \
-  -- \
-  --run_external_vcf_comparison false \
-  --run_proteogenomic_validation false
-)
+  --account "$SLURM_ACCOUNT" \
+  --normal-partition "$PART_NORM" \
+  --bigmem-partition "$PART_BIG" \
+  --project-dir "$PWD" \
+  --work-dir "$WORK_ROOT/pgtk-work" \
+  --results-dir "$DATA_ROOT/results" \
+  --reference-downloads "$DATA_ROOT/reference_downloads" \
+  --container-cache "$DATA_ROOT/singularity_cache" \
+  --sra-dir "$DATA_ROOT/sra_cache" \
+  --tmp-root "$WORK_ROOT/pgtk-tmp" \
+  --nxf-home "$DATA_ROOT/.nextflow_home" \
+  --samplesheet "$DATA_ROOT/samples.csv" \
+  --ensembl-pep "$DATA_ROOT/reference_downloads/Homo_sapiens.GRCh38.pep.all.fa.gz" \
+  --pysam-image "$DATA_ROOT/singularity_cache/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img" \
+  --nextflow "$NF_PATH" \
+  --python "$PYTHON_PATH" \
+  --apptainer "$APPTAINER_PATH" \
+  --java-module Java/21.0.2 \
+  --slurm-log-template "$PWD/pgtk-wrapper-{job_id}.log" \
+  --)
 printf '%s\n' "$JOB_ID" | tee .pgtk_current_job_id
+tail -F "pgtk-wrapper-${JOB_ID}.log"
 ```
 
-### 9. Monitor
+## Integrated final validation
 
-```bash
-LOG=${PGTK_SLURM_LOG_TEMPLATE//\{job_id\}/$JOB_ID}
-tail -F "$LOG"
-squeue -j "$JOB_ID" -o '%.18i %.12P %.35j %.10T %.10M %.10l %R'
-```
+The default final process is `VALIDATE_PUBLISHED_RESULTS` with 32 workers, 256 GB memory, 24 hours, bigmem routing, all-findings selection, and terminating failure behavior. It validates source/runtime provenance, trace states, declared processes, published arithmetic, VCFs/indexes, BAMs/indexes/CIGAR identities, IGV resources, raw VCF publication, per-sample non-subtracted FASTAs, progression reports, explorer integrity, MultiQC/catalogue integrity, FASTA structure, and report/archive checksums.
 
-## Optional Sarek evaluation
-
-PGTK expects exactly one indexed VCF per samplesheet SRA accession, found recursively as `<SRR><suffix>`.
-
-```bash
-export PGTK_EXTERNAL_VCF_DIR="${PGTK_EXTERNAL_VCF_DIR:?Set Sarek VCF root}"
-export PGTK_EXTERNAL_VCF_SUFFIX="${PGTK_EXTERNAL_VCF_SUFFIX:-.haplotypecaller.filtered.vcf.gz}"
-```
-
-Add before the wrapper separator:
-
-```bash
---bind-path "$PGTK_EXTERNAL_VCF_DIR"
-```
-
-Add after the wrapper separator:
-
-```bash
---run_external_vcf_comparison true \
---external_vcf_dir "$PGTK_EXTERNAL_VCF_DIR" \
---external_vcf_suffix "$PGTK_EXTERNAL_VCF_SUFFIX"
-```
-
-First run with `--preflight-only`, then submit the same command without it. Results are under `results/comparison/external_vcf/` and compare raw, PASS, and RNA-validated PGTK calls.
-
-## Optional MaxQuant evaluation
-
-1. Run PGTK with proteogenomic validation disabled.
-2. Use sample FASTAs from `results/combined_fasta/` in MaxQuant.
-3. Run MaxQuant externally.
-4. Resume PGTK with validation enabled.
-
-Required MaxQuant files:
+Outputs:
 
 ```text
-peptides.txt
-evidence.txt
-msms.txt
-proteinGroups.txt
-mqpar.xml
-contaminants FASTA
+results/validation/PGTK-complete-validation-<job-id>/
+results/validation/PGTK-complete-validation-<job-id>.tar.gz
+results/validation/PGTK-complete-validation-<job-id>.tar.gz.sha256
+results/validation/PGTK-deep-audit-<job-id>/
+results/validation/PGTK-deep-audit-<job-id>.tar.gz
+results/validation/PGTK-deep-audit-<job-id>.tar.gz.sha256
 ```
 
-Configure:
+A run is accepted only when Nextflow exits successfully, complete validation reports `Overall: PASS`, deep audit reports `ERROR: 0`, and archive checksum verification succeeds.
+
+## Independent local results audit
+
+`audit_pgtk_results.py` performs a separate read-only audit of a completed `results/` tree. It inventories and hashes results; validates gzip/tar, checksum manifests, tabular files, JSON, XML, VCF/index pairs, BAM/index pairs, BED/BEDPE coordinates, trace states, logs, source syntax, failure ledgers, and final validation archives; then creates a shareable report bundle.
+
+The auditor discovers `samtools` through `PATH`. To use the pinned Pysam 0.24.0 container and its embedded samtools 1.23.1 implementation, create this temporary wrapper:
 
 ```bash
-export PGTK_MAXQUANT_TXT="${PGTK_MAXQUANT_TXT:?Set MaxQuant txt directory}"
-export PGTK_MAXQUANT_MQPAR="${PGTK_MAXQUANT_MQPAR:?Set mqpar.xml}"
-export PGTK_MAXQUANT_CONTAMINANTS="${PGTK_MAXQUANT_CONTAMINANTS:?Set contaminants FASTA}"
-export PGTK_MAXQUANT_RAW_MAP="${PGTK_MAXQUANT_RAW_MAP:-}"
+cd PGTK
+AUDIT_BIN=$(mktemp -d /cluster/work/users/ash022/pgtk-pysam-audit.XXXXXX)
+cat > "${AUDIT_BIN}/samtools" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+PYSAM_IMAGE="PGTK/singularity_cache/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img"
+if [[ "${1:-}" != "quickcheck" ]]; then
+    echo "This wrapper supports only: samtools quickcheck" >&2
+    exit 2
+fi
+shift
+exec /usr/bin/apptainer exec \
+  --bind PGTK \
+  "$PYSAM_IMAGE" \
+  python3 -c '
+import sys
+import pysam
+try:
+    pysam.samtools.quickcheck(*sys.argv[1:], catch_stdout=False)
+except pysam.utils.SamtoolsError as exc:
+    print(exc, file=sys.stderr)
+    raise SystemExit(1)
+' "$@"
+EOF
+chmod 755 "${AUDIT_BIN}/samtools"
 ```
 
-Add required bind roots before the separator:
+Run the validator. Replace `19715562` for another run:
 
 ```bash
---bind-path "$PGTK_MAXQUANT_TXT" \
---bind-path "$(dirname "$PGTK_MAXQUANT_MQPAR")" \
---bind-path "$(dirname "$PGTK_MAXQUANT_CONTAMINANTS")"
+PATH="${AUDIT_BIN}:${PATH}" /cluster/software/Mamba/4.14.0-0/bin/python3 \
+  audit_pgtk_results.py \
+  --project-dir PGTK \
+  --results-dir PGTK/results \
+  --job-id 19715562 \
+  --output-dir PGTK \
+  --hash-large-files
+rm -rf "${AUDIT_BIN}"
+sha256sum -c PGTK-independent-audit-19715562.tar.gz.sha256
 ```
 
-Add after the separator:
+Outputs:
+
+```text
+PGTK-independent-audit-<job-id>/REPORT.md
+PGTK-independent-audit-<job-id>/checks.tsv
+PGTK-independent-audit-<job-id>/summary.json
+PGTK-independent-audit-<job-id>/results_inventory.tsv
+PGTK-independent-audit-<job-id>/results_checksums.sha256
+PGTK-independent-audit-<job-id>/audit_bundle_checksums.sha256
+PGTK-independent-audit-<job-id>.tar.gz
+PGTK-independent-audit-<job-id>.tar.gz.sha256
+```
+
+### Verified production run 19715562
+
+Independent verification on 3 September 2026 produced:
+
+```text
+Source preflight: 146 PASS, 0 FAIL
+Runtime preflight: PASS
+Nextflow tasks: 211 CACHED, 1 COMPLETED, 0 FAILED, 0 ABORTED
+Current failure ledger rows: 0
+Result files: 722
+Result size: 54.3 GiB
+Result files hashed: 722/722
+Audit checks: 656 PASS, 1 WARN, 0 FAIL
+Pysam/samtools BAM quickchecks: 18/18 PASS
+Audit bundle SHA-256: 352b70f46d452a14dde9f04215ac23176efc95c1ac57748618a4ef2d9b9b584c
+```
+
+## Optional external VCF comparison
+
+Add the external root as a wrapper bind before `--`, then enable the branch after `--`:
 
 ```bash
+--bind-path /path/to/external_vcfs \
+-- \
+--run_external_vcf_comparison true \
+--external_vcf_dir /path/to/external_vcfs \
+--external_vcf_suffix .haplotypecaller.filtered.vcf.gz
+```
+
+Exactly one indexed `<SRR><suffix>` file must exist per samplesheet accession.
+
+## Optional MaxQuant validation
+
+Run PGTK first with the branch disabled, search the published sample FASTAs externally, then resume with:
+
+```bash
+--bind-path /path/to/maxquant/txt \
+--bind-path /path/to/mqpar_parent \
+--bind-path /path/to/contaminants_parent \
+-- \
 --run_proteogenomic_validation true \
---maxquant_txt "$PGTK_MAXQUANT_TXT" \
---maxquant_mqpar "$PGTK_MAXQUANT_MQPAR" \
---maxquant_contaminants "$PGTK_MAXQUANT_CONTAMINANTS" \
---ensembl_pep "$PGTK_ENSEMBL_PEP"
+--maxquant_txt /path/to/maxquant/txt \
+--maxquant_mqpar /path/to/mqpar.xml \
+--maxquant_contaminants /path/to/contaminants.fasta
 ```
 
-If supplied, also pass `--maxquant_raw_map "$PGTK_MAXQUANT_RAW_MAP"`. Preflight first, then resume. Results are under `results/proteogenomics_validation/`.
+Required inputs are `peptides.txt`, `evidence.txt`, `msms.txt`, `proteinGroups.txt`, `mqpar.xml`, searched FASTAs, and the contaminants FASTA.
 
-## Post-run checks
+## Finding Explorer
+
+The explorer is published under `results/igv/findings/finding_explorer/`. Set the pinned images and launch from the project root:
 
 ```bash
-JOB_ID=$(cat "$PGTK_PROJECT_DIR/.pgtk_current_job_id")
-TRACE="$PGTK_RESULTS_DIR/pipeline_trace-${JOB_ID}.tsv"
-awk -F '\t' 'NR==1 || ($7!="COMPLETED" && $7!="CACHED")' "$TRACE"
-cat "$PGTK_RESULTS_DIR/failure_logs/$JOB_ID/run_summary.json"
-cat "$PGTK_RESULTS_DIR/failure_logs/$JOB_ID/failure_ledger.tsv"
-python3 "$PGTK_PROJECT_DIR/tests/validate_published_findings.py" \
-  "$PGTK_RESULTS_DIR/igv/findings/finding_explorer/partitions/all.jsonl.gz"
+export PGTK_PYSAM_IMAGE="$DATA_ROOT/singularity_cache/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img"
+export PGTK_IGV_REPORTS_IMAGE="$DATA_ROOT/singularity_cache/quay.io-biocontainers-igv-reports-1.16.0--pyh7e72e81_0.img"
+bash serve_finding_explorer.sh "$DATA_ROOT/results/igv/findings/finding_explorer" 8765
 ```
 
-The trace should print only the header, the final exit code should be zero, the failure ledger should contain only its header, and the findings validator should pass.
+The server extracts event-specific BAMs from exact identities in `display_alignment_manifest.tsv.gz`. Sample-wide display BAMs are storage pools only.
 
-## Run the IGV finding server
+## Core defaults
 
-This is the complete server command:
-
-```bash
-export PGTK_IGV_REPORTS_IMAGE="$PGTK_CONTAINER_CACHE/quay.io-biocontainers-igv-reports-1.16.0--pyh7e72e81_0.img"
-export PGTK_IGV_GENOME="${PGTK_IGV_GENOME:-$PGTK_REFERENCE_DOWNLOADS/Homo_sapiens.GRCh38.dna.primary_assembly.fa}"
-export PGTK_EXPLORER_PORT="${PGTK_EXPLORER_PORT:-8765}"
-
-EXPLORER_DIR="$PGTK_RESULTS_DIR/igv/findings/finding_explorer"
-rm -rf "$EXPLORER_DIR/report_cache"
-
-bash "$PGTK_PROJECT_DIR/serve_finding_explorer.sh" \
-  "$EXPLORER_DIR" \
-  "$PGTK_EXPLORER_PORT"
+```text
+HaplotypeCaller shards: 24
+Calling confidence: 20
+RNA minimum depth: 10
+RNA minimum ALT reads: 3
+RNA minimum ALT fraction: 0.05
+Finding MAPQ: 20
+Finding base quality: 20
+Reference display cap: 20
+ALT display cap: 100
+Splice minimum coverage: 2.5
+Splice minimum junction reads: 3
+GO set size: 10 to 500
+GO FDR: 0.1
+Final validation workers: 32
+Final validation memory: 256 GB
+Final validation time: 24h
 ```
 
-From the local computer:
-
-```bash
-export PGTK_REMOTE_LOGIN="${PGTK_REMOTE_LOGIN:?Set user@login-host}"
-ssh -N -L \
-  "${PGTK_EXPLORER_PORT}:127.0.0.1:${PGTK_EXPLORER_PORT}" \
-  "$PGTK_REMOTE_LOGIN"
-```
-
-Open `http://127.0.0.1:<port>/`.
-
-Test representative SNVs, MNVs, insertions, deletions, no-callable findings, low-callable-fraction findings, fusions, splice events, progression events, and MaxQuant-linked events when enabled. HTTP 200 proves HTML delivery only. Confirm that IGV renders without missing tracks or JavaScript errors.
-
-## Evidence interpretation
+## Evidence arithmetic
 
 ```text
 CallableAlignments = ExactAltReads + CleanReferenceReads
 UniqueAlignments = CallableAlignments + ExcludedReads
 ALT fraction among callable = ExactAltReads / CallableAlignments
-Callable fraction among examined = CallableAlignments / UniqueAlignments
 ```
 
-When callable depth is zero, ALT fraction must be `NA` or null. Overlap alone is not ALT evidence.
+When callable depth is zero, ALT fraction must be null or `NA`. Coordinate overlap alone is not ALT evidence.
 
-## Principal output locations
+## Principal outputs
 
 ```text
 results/qc/
@@ -683,6 +444,9 @@ results/progression_vcf/
 results/progression_biology/
 results/expression/
 results/variant_landscape/
+results/variant_fasta/
+results/fusion_fasta/
+results/splice_fasta/
 results/combined_fasta/
 results/igv/
 results/reports/
@@ -690,36 +454,101 @@ results/comparison/external_vcf/
 results/proteogenomics_validation/
 results/comparative_advantage/
 results/multiqc/
+results/validation/
 results/failure_logs/
 ```
 
+## Repository file catalogue
+
+The following files are expected in the flat repository root. `pipeline_required_files.txt` is the authoritative machine-readable manifest and must be kept synchronized with source additions or removals.
+
+- `.gitattributes`: Normalizes repository text files to LF line endings.
+- `.gitignore`: Excludes generated data, caches, logs, reports, and local runtime state.
+- `LICENSE`: MIT license.
+- `PIPELINE_VALIDATION_SEMANTICS.md`: Defines validation scope, acceptance semantics, and interpretation of PASS, WARN, and FAIL.
+- `README.md`: Primary installation, execution, architecture, validation, and output guide.
+- `analyze_chimeric_splice_peptides.py`: Analyzes fusion/splice peptide mappings and inferred junctions.
+- `analyze_codon_mismatches.py`: Diagnoses codon translation mismatches and produces manual-review classifications.
+- `analyze_pipeline_trace.py`: Summarizes Nextflow trace resource utilization and warnings.
+- `analyze_progression_biology.py`: Analyzes non-baseline-only progression alleles, genes, candidates, and GO enrichment.
+- `analyze_variant_landscape.py`: Summarizes variant stages, classes, nonsynonymous genes, and GO enrichment.
+- `annotate_variant_peptides.py`: Connects peptide candidates to VEP variants and translated variant proteins.
+- `audit_pgtk_results.py`: Independent read-only post-run structural and integrity auditor that creates a shareable evidence bundle.
+- `build_compact_multiqc_content.py`: Builds compact custom content for the lightweight final MultiQC report.
+- `build_comparative_advantage_report.py`: Builds cross-stage VCF, FASTA, RNA-event, progression, and optional external-caller inventories.
+- `build_complete_report.py`: Builds the consolidated RNA finding, failure, software, and validation reports.
+- `build_expression_multiqc_content.py`: Builds expression and GO MultiQC custom content.
+- `build_finding_explorer.py`: Creates the database-free interactive finding explorer and embedded evidence records.
+- `build_finding_igv_reviews.py`: Builds strict exact-identity finding review BAM pools, manifests, labels, and IGV resources.
+- `build_igv_evidence_bundle.py`: Builds all-event IGV BED/BEDPE, event BAMs, manifests, batch files, and session XML.
+- `build_integrated_variant_evidence.py`: Combines proteomic variant evidence with codon validation and mismatch analysis.
+- `build_pgtk_multiqc_content.py`: Builds complete PGTK custom MultiQC content and report links.
+- `build_results_catalogue.py`: Discovers published outputs and creates the final results-catalogue MultiQC content.
+- `collect_pipeline_failures.py`: Collects task failures and maintains per-run and cumulative failure ledgers.
+- `compare_external_vcf.py`: Compares PGTK VCF stages with an optional indexed external VCF.
+- `compare_progression_pair.py`: Computes pairwise progression allele, gene, and GO contrasts.
+- `download_assets.sh`: Login-node downloader and validator for 18 pinned containers and 8 reference assets.
+- `download_sra.sh`: Login-node downloader and validator for samplesheet SRA archives.
+- `expression_go_analysis.py`: Merges featureCounts outputs and performs expression ORA, ranked GO, and progression variant-set GO analyses.
+- `external_comparison.none.tsv`: Typed placeholder used when external VCF comparison is disabled.
+- `main.nf`: Nextflow DSL2 workflow containing all 76 processes and channel wiring.
+- `map_peptides_to_fasta.py`: Maps MaxQuant peptides to canonical, contaminant, variant, splice, fusion, and progression FASTAs.
+- `maxquant_raw_file_map.none.tsv`: Typed placeholder used when no explicit MaxQuant raw-file map is supplied.
+- `merge_progression_biology.py`: Merges per-sample and pairwise progression biology reports.
+- `merge_variant_validation.py`: Merges per-sample codon and read-provenance validation outputs.
+- `multiqc_config.yaml`: Configuration for the custom-content final MultiQC dashboard.
+- `nextflow.config`: Executor, Apptainer, resource routing, retry, trace, report, timeline, and DAG configuration.
+- `prepare_event_igv_tracks.py`: Creates event-specific IGV tracks from exact display-alignment identities.
+- `prepare_go_annotations.py`: Builds propagated gene-to-GO mappings and records ontology/GAF provenance.
+- `proteogenomics_evidence_report.py`: Integrates MaxQuant evidence, MBR/direct-MS evidence classes, samples, FASTAs, VEP, variants, and junctions.
+- `report_legend.py`: Shared report-language and evidence-interpretation legend.
+- `samples.csv`: Example/current samplesheet with sample, SRA, subject, group, and baseline metadata.
+- `scratch.slurm`: Saga submission wrapper. Performs source and runtime preflight, loads Java, launches Nextflow with resume, and finalizes resource/failure reports.
+- `serve_finding_explorer.sh`: Starts the finding explorer with pinned Pysam and igv-reports containers.
+- `summarize_variant_stages.py`: Summarizes raw, PASS, and RNA-validated VCF stages with provenance and checksums.
+- `test_container_bindings.py`: Regression tests for explicit shared Apptainer bind contracts.
+- `test_igv_event_identity.py`: Regression tests for exact event-to-display-alignment identity.
+- `test_program_interfaces.py`: Regression tests for Python CLI and program-to-program interfaces.
+- `test_semantics.py`: Regression tests for validation semantics and required source behavior.
+- `validate_haplotype_shards.py`: Checks expected HaplotypeCaller shard count, names, indexes, and non-empty inputs before gathering.
+- `validate_pgtk_results_complete.py`: Integrated final validator and deep audit invoked by VALIDATE_PUBLISHED_RESULTS.
+- `validate_pipeline_commands.sh`: Static source preflight: required files, syntax, process uniqueness, interface contracts, bindings, and Nextflow inspection.
+- `validate_proteogenomic_reads.py`: Performs read-level validation and IGV export for optional proteogenomic findings.
+- `validate_published_findings.py`: Validates published finding arithmetic, file relationships, event identities, and report invariants.
+- `validate_rna_events.py`: Validates RNA variants, fusions, and splice transcripts and emits accepted/rejected audit outputs.
+- `validate_runtime_inputs.py`: Exact runtime preflight for directories, binds, tools, containers, references, samplesheet, SRA archives, optional branches, and Nextflow inspection.
+- `validate_samplesheet_design.py`: Normalizes and validates samplesheet semantics, including one-baseline-per-subject rules.
+- `validate_splice_junction_peptides.py`: Validates splice peptides against transcript models and reference annotation.
+- `validate_variant_codons.py`: Validates VEP codon/protein consequences against exact RNA read evidence.
+- `validate_variant_read_provenance.py`: Reports exact ALT-supporting RNA reads with SRA, FASTQ mate, alignment, CIGAR, and quality provenance.
+- `variant_read_evidence.py`: Shared exact-allele read classifier used by codon, provenance, IGV, and final validation code.
+- `pipeline_required_files.txt`: Authoritative source-file manifest used by preflight validation. This file must remain in the repository even though it was not included in this review archive.
+
+
 ## Common failures
 
-- `Option -resume is ignored`: restore the previous `.nextflow` history and resubmit.
-- Container cannot open a project script: inspect the explicit bind contract; do not use a broad site-wide bind.
-- `--slurm-log-template must contain {job_id}`: retain the literal placeholder.
-- Too many reruns: compare physical source path, scripts, inputs, parameters, containers, work directory, and run history.
-- Sarek preflight finds zero or multiple files: require exactly one `<SRR><suffix>` and `.tbi` per accession.
-- MaxQuant preflight fails: verify four tables, `mqpar.xml`, canonical FASTA paths, contaminants, raw mapping, and bind roots.
-- Explorer HTTP 500 for missing BAM: use the project-level launcher and keep sibling `finding_reviews` with `finding_explorer`.
-- Browser `reading del`: regenerate current browser-safe display BAMs, clear report cache, restart, and hard-refresh.
-- BAM index older than BAM: rebuild the index after the final BAM write.
-- A biological `failed.tsv` is not a task failure. Use trace, exit code, wrapper log, and failure ledger.
+- `Option -resume is ignored`: restore the matching `.nextflow` history and work directory.
+- Java/version error: load `Java/21.0.2` before source validation or submission.
+- Source preflight failure: do not submit until `FAIL: 0` and `RESULT: PASSED` are obtained with the real Nextflow executable.
+- Multiple baselines: correct the samplesheet. The workflow rejects the subject design.
+- Missing bind path: add the required external root with `--bind-path` before the wrapper separator.
+- Final validation failure: inspect `results/validation/PGTK-complete-validation-<job-id>/checks.tsv` and deep-audit `issues.tsv`.
+- A biological `failed.tsv` is not a process failure. Use the trace, wrapper exit code, failure ledger, and final validation report.
+- Independent audit warns that samtools is unavailable: rerun with the Pysam wrapper shown above.
 
-## Release checklist
+## Acceptance checklist
 
 ```text
-Source validation passes
-Binding regression passes
-Preflight-only job passes
-Production exit code is zero
-Trace contains only COMPLETED and CACHED
-Failure ledger contains only header
-Whole findings validator passes
-Representative IGV reports render
-Sarek outputs checked when enabled
-MaxQuant outputs checked when enabled
-MultiQC dashboard and Results catalogue open
+Source preflight: PASS
+Exact runtime preflight: PASS
+Production wrapper exit code: 0
+Trace: COMPLETED or CACHED, except active final validator while running
+Failure ledger: header only after wrapper finalization
+Complete validation: PASS
+Deep audit: ERROR 0
+Independent audit: FAIL 0
+Pysam BAM quickcheck: all BAMs PASS
+Archive checksums: PASS
 ```
 
 ## License

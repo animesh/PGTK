@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util, os, tempfile
 from pathlib import Path
-project=Path(__file__).resolve().parents[1]
+project=Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('runtime',project/'validate_runtime_inputs.py');mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
 with tempfile.TemporaryDirectory() as td:
  root=Path(td); visible=root/'visible';visible.mkdir();marker=visible/'marker';marker.write_text('ok');image=root/'image';image.write_text('x');log=root/'args';app=root/'apptainer'

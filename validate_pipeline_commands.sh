@@ -40,6 +40,9 @@ deployment_pattern='/(cluster|home|Users|mnt|scratch|work|projects)/|(^|[^[:alnu
 hits=$(grep -nEH "$deployment_pattern" "${portable_existing[@]}" 2>/dev/null | grep -v "deployment_pattern=" || true)
 [[ -z $hits ]] && pass 'No deployment-specific identities or absolute HPC paths in executable/config source' || { printf '%s\n' "$hits"; fail 'Deployment-specific value embedded in executable/config source'; }
 for file in "$PROJECT_DIR"/*.py; do "$PYTHON" -m py_compile "$file" && pass "Python syntax: $(basename "$file")" || fail "Python syntax: $(basename "$file")"; done
+for test_file in test_semantics.py test_container_bindings.py test_igv_event_identity.py test_program_interfaces.py; do
+    "$PYTHON" "$PROJECT_DIR/$test_file" && pass "Executable contract test: $test_file" || fail "Executable contract test: $test_file"
+done
 for file in "$PROJECT_DIR"/*.sh "$PROJECT_DIR"/*.slurm; do [[ -e $file ]] || continue; bash -n "$file" && pass "Shell syntax: $(basename "$file")" || fail "Shell syntax: $(basename "$file")"; done
 mapfile -t processes < <(awk '/^process[[:space:]]+[A-Za-z0-9_]+[[:space:]]*\{/ {print $2}' "$PROJECT_DIR/main.nf")
 (( ${#processes[@]} > 0 )) && pass "Nextflow processes discovered: ${#processes[@]}" || fail 'No Nextflow processes discovered'

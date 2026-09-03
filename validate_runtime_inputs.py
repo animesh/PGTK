@@ -155,7 +155,15 @@ def main():
     with args.samplesheet.open(newline='',encoding='utf-8') as handle:
         reader=csv.DictReader(handle); fields=reader.fieldnames or []; rows=list(reader)
     if not {'sample','srr'} <= set(fields) or not rows: raise RuntimeError('samplesheet requires sample,srr and at least one row')
-    samples=set(); srrs=set(); sra_image=cache/'quay.io-biocontainers-sra-tools-3.2.1--h4304569_0.img'
+    samples=set(); srrs=set(); subjects={}; sra_image=cache/'quay.io-biocontainers-sra-tools-3.2.1--h4304569_0.img'
+    for row in rows:
+        sample=(row.get('sample') or '').strip()
+        subject=(row.get('TK') or sample).strip()
+        subjects.setdefault(subject, []).append(row)
+    for subject, members in sorted(subjects.items()):
+        baselines=[(row.get('sample') or '').strip() for row in members if (row.get('baseline') or 'false').strip().lower() == 'true']
+        if len(baselines) > 1: raise RuntimeError(f'multiple baselines for {subject}: {baselines}')
+        if not baselines: print(f'  INFO  {subject}: no baseline; subtraction will be skipped', flush=True)
     print(f'  CHECK {len(rows)} samples from {args.samplesheet}', flush=True)
     for line,row in enumerate(rows,2):
         sample=(row.get('sample') or '').strip(); srr=(row.get('srr') or '').strip()

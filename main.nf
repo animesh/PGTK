@@ -89,6 +89,11 @@ params.expression_rank_min_nonzero_scores = 1
 params.go_expression_background = 'genome'
 params.go_variant_background = 'genome'
 params.go_variant_biotypes = 'protein_coding'
+params.run_postrun_validation = true
+params.postrun_validation_workers = 32
+params.postrun_validation_memory = '256 GB'
+params.postrun_validation_time = '24h'
+params.pipeline_job_id = System.getenv('PGTK_PIPELINE_JOB_ID') ?: 'nextflow'
 
 
 def strictBooleanParam(value, String name) {
@@ -192,6 +197,29 @@ def resolveMaxQuantCanonicalFastas(mqpar_file, maxquant_txt, override_value, sam
     }
     if (!canonical_entries) error "No canonical FASTA remains after matching mqpar.xml entries to pipeline-generated sample FASTAs"
     return canonical_entries.collect { resolveExistingFasta(it, mqpar_file, maxquant_txt) }
+}
+
+process VALIDATE_SAMPLESHEET_DESIGN {
+    tag 'samplesheet_design'
+    cpus 1; memory '2 GB'; time '30m'; disk '5 GB'
+    container 'quay.io/biocontainers/multiqc:1.35--pyhdfd78af_1'
+    publishDir "${params.outdir}/qc/samplesheet", mode:'copy', pattern:'samplesheet_design.tsv'
+    input:
+    path input_samplesheet
+    path validator
+    output:
+    path 'validated_samples.csv', emit: samplesheet
+    path 'samplesheet_design.tsv', emit: report
+    script:
+    """
+    set -euo pipefail
+    python3 ${validator} \
+      --input ${input_samplesheet} \
+      --validated-samplesheet validated_samples.csv \
+      --report samplesheet_design.tsv
+    test -s validated_samples.csv
+    test -s samplesheet_design.tsv
+    """
 }
 
 process DOWNLOAD_REFERENCES {
@@ -1601,6 +1629,7 @@ process BUILD_FINDING_IGV_REVIEWS {
         --sample-filter '${params.igv_report_sample_filter}'
     test -s finding_reviews/findings_manifest.tsv
     test -s finding_reviews/bam_manifest.tsv
+    test -s finding_reviews/display_alignment_manifest.tsv.gz
     test -s finding_reviews/support_labels.bed
     test -s finding_reviews/priority_findings.bed
     test -s finding_reviews/review.igv.batch.txt
@@ -1680,16 +1709,19 @@ process BUILD_FINDING_EXPLORER {
     path explorer_script
     path server_launcher
     path report_legend_script
+    path event_track_script
     output:
     path 'finding_explorer', emit: explorer
     script:
     """
     set -euo pipefail
     mkdir -p finding_explorer
-    python3 ${explorer_script} --manifest ${finding_reviews}/findings_manifest.tsv --excluded-reads ${finding_reviews}/excluded_reads.tsv --bam-manifest ${finding_reviews}/bam_manifest.tsv --genome ${genome} --flanking ${params.read_validation_padding} --output-dir finding_explorer
+    python3 ${explorer_script} --manifest ${finding_reviews}/findings_manifest.tsv --excluded-reads ${finding_reviews}/excluded_reads.tsv --bam-manifest ${finding_reviews}/bam_manifest.tsv --display-manifest ${finding_reviews}/display_alignment_manifest.tsv.gz --genome ${genome} --flanking ${params.read_validation_padding} --output-dir finding_explorer
     cp ${server_launcher} finding_explorer/serve_explorer.sh
     cp ${report_legend_script} finding_explorer/report_legend.py
+    cp ${event_track_script} finding_explorer/prepare_event_igv_tracks.py
     test -s finding_explorer/report_legend.py
+    test -s finding_explorer/prepare_event_igv_tracks.py
     total=\$(awk -F': ' '\$1=="Findings" {print \$2}' finding_explorer/coverage_summary.txt)
     records=\$(awk -F': ' '\$1=="Embedded compact records" {print \$2}' finding_explorer/coverage_summary.txt)
     discarded=\$(awk -F': ' '\$1=="Findings discarded" {print \$2}' finding_explorer/coverage_summary.txt)
@@ -2241,6 +2273,56 @@ process PREPARE_RESULTS_CATALOGUE {
     """
 }
 
+process VALIDATE_PUBLISHED_RESULTS {
+    tag "postrun_validation:${params.pipeline_job_id}"
+    cpus { params.postrun_validation_workers as int }
+    memory { params.postrun_validation_memory }
+    time { params.postrun_validation_time }
+    disk '100 GB'
+    container "${params.pysam_image}"
+    publishDir "${params.outdir}/validation", mode:'copy'
+    errorStrategy 'terminate'
+    maxRetries 0
+    input:
+    path final_report
+    path validator
+    val project_dir
+    val results_dir
+    val pipeline_job_id
+    output:
+    path "PGTK-complete-validation-${pipeline_job_id}", emit: report_dir
+    path "PGTK-complete-validation-${pipeline_job_id}.tar.gz", emit: archive
+    path "PGTK-complete-validation-${pipeline_job_id}.tar.gz.sha256", emit: checksum
+    path "PGTK-deep-audit-${pipeline_job_id}", emit: deep_audit_dir
+    path "PGTK-deep-audit-${pipeline_job_id}.tar.gz", emit: deep_audit_archive
+    path "PGTK-deep-audit-${pipeline_job_id}.tar.gz.sha256", emit: deep_audit_checksum
+    script:
+    """
+    set -euo pipefail
+    test -s ${final_report}
+    python3 ${validator} \
+      --pipeline-mode \
+      --project-dir '${project_dir}' \
+      --results-dir '${results_dir}' \
+      --job-id '${pipeline_job_id}' \
+      --workers ${task.cpus} \
+      --max-events 0 \
+      --output-root "\$PWD" \
+      --pysam-image '${params.pysam_image}' \
+      --host-python "\$(command -v python3)" \
+      --nextflow /bin/false \
+      --apptainer /bin/false
+    test -s PGTK-complete-validation-${pipeline_job_id}/REPORT.md
+    test -s PGTK-complete-validation-${pipeline_job_id}/checks.tsv
+    test -s PGTK-complete-validation-${pipeline_job_id}/summary.json
+    test -s PGTK-complete-validation-${pipeline_job_id}.tar.gz
+    test -s PGTK-complete-validation-${pipeline_job_id}.tar.gz.sha256
+    test -s PGTK-deep-audit-${pipeline_job_id}/REPORT.md
+    test -s PGTK-deep-audit-${pipeline_job_id}.tar.gz
+    test -s PGTK-deep-audit-${pipeline_job_id}.tar.gz.sha256
+    """
+}
+
 process MULTIQC_FINAL {
     tag 'integrated_final_report'
     cpus 2; memory '8 GB'; time '4h'; disk '30 GB'
@@ -2283,12 +2365,13 @@ workflow {
     if ((params.finding_review_baseq as int) < 0) error '--finding_review_baseq must be non-negative'
     if ((params.finding_review_reference_reads as int) < 0) error '--finding_review_reference_reads must be non-negative'
     if ((params.read_validation_padding as int) < 0) error '--read_validation_padding must be non-negative'
-    samples = channel.fromPath(params.samplesheet, checkIfExists:true).splitCsv(header:true).map { row ->
-        if (!row.sample || !row.srr) error 'samples.csv requires sample and srr; TK, Group and baseline are optional'
+    samplesheet_source = file(params.samplesheet, checkIfExists:true)
+    samplesheet_validator = file("${projectDir}/validate_samplesheet_design.py", checkIfExists:true)
+    validated_samplesheet = VALIDATE_SAMPLESHEET_DESIGN(samplesheet_source, samplesheet_validator)
+    samples = validated_samplesheet.samplesheet.splitCsv(header:true).map { row ->
         def sample = row.sample.trim()
         def srr = row.srr.trim()
         def baselineValue = (row.baseline ?: 'false').trim().toLowerCase()
-        if (!(baselineValue in ['true','false'])) error "baseline must be true or false for ${sample}"
         def meta=[sample:sample, srr:srr, tk:(row.TK ?: sample).trim(), group:(row.Group ?: sample).trim(), baseline:baselineValue]
         def sraFile = file("${params.sra_dir}/${srr}/${srr}.sra", checkIfExists: true)
         tuple(meta, srr, sraFile)
@@ -2522,7 +2605,8 @@ workflow {
         finding_explorer_script=file("${projectDir}/build_finding_explorer.py",checkIfExists:true)
         finding_explorer_launcher=file("${projectDir}/serve_finding_explorer.sh",checkIfExists:true)
         finding_explorer_legend=file("${projectDir}/report_legend.py",checkIfExists:true)
-        finding_explorer=BUILD_FINDING_EXPLORER(finding_reviews.reviews, refs.genome, finding_explorer_script, finding_explorer_launcher, finding_explorer_legend)
+        finding_explorer_tracks=file("${projectDir}/prepare_event_igv_tracks.py",checkIfExists:true)
+        finding_explorer=BUILD_FINDING_EXPLORER(finding_reviews.reviews, refs.genome, finding_explorer_script, finding_explorer_launcher, finding_explorer_legend, finding_explorer_tracks)
         catalogue_explorer_ready = finding_explorer.explorer
     }
     comparative_report_script=file("${projectDir}/build_comparative_advantage_report.py", checkIfExists:true)
@@ -2667,5 +2751,9 @@ workflow {
         booleanText(params.run_proteogenomic_validation, '--run_proteogenomic_validation')
     )
     final_multiqc_inputs = dashboard_content.mix(results_catalogue.content).collect()
-    MULTIQC_FINAL(qc_files, final_multiqc_inputs, multiqc_config_file)
+    final_multiqc = MULTIQC_FINAL(qc_files, final_multiqc_inputs, multiqc_config_file)
+    if (strictBooleanParam(params.run_postrun_validation, '--run_postrun_validation')) {
+        postrun_validator = file("${projectDir}/validate_pgtk_results_complete.py", checkIfExists:true)
+        VALIDATE_PUBLISHED_RESULTS(final_multiqc.report, postrun_validator, projectDir.toString(), params.outdir.toString(), params.pipeline_job_id.toString())
+    }
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import sys
 from pathlib import Path
-sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0,str(Path(__file__).resolve().parent))
 from variant_read_evidence import classify_sam_fields,evidence_status
 assert evidence_status(0,0,9)[3] is None
 assert evidence_status(2,0,0)[0]=='ALT_SUPPORTED'

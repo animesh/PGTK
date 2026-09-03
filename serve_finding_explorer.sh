@@ -1,29 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
-root=${1:-$(pwd -P)}
-port=${2:-8765}
-image=${PGTK_IGV_REPORTS_IMAGE:?Set PGTK_IGV_REPORTS_IMAGE to the igv-reports image}
-apptainer_bin=${PGTK_APPTAINER:-$(command -v apptainer || true)}
-[[ -n $apptainer_bin && -x $apptainer_bin ]] || { echo "ERROR: apptainer is not executable" >&2; exit 2; }
-root=$(cd "$root" && pwd -P)
-config=$root/explorer_config.json
-[[ -s $root/server.py && -s $config ]] || { echo "ERROR: incomplete explorer directory: $root" >&2; exit 2; }
-[[ -s $image ]] || { echo "ERROR: IGV reports image not found: $image" >&2; exit 2; }
-readarray -t resources < <(python3 - "$config" <<'PY2'
-import json,os,sys
-from pathlib import Path
-root=Path(sys.argv[1]).resolve().parent
-config=json.loads(Path(sys.argv[1]).read_text())
-genome=Path(os.environ.get('PGTK_IGV_GENOME',config['genome'])).expanduser().resolve()
-print(genome)
-for track in config['tracks']:
- p=Path(track['path']).expanduser();print(p.resolve() if p.is_absolute() else (root/p).resolve())
-PY2
-)
-((${#resources[@]})) || { echo "ERROR: explorer has no resources" >&2; exit 2; }
-for resource in "${resources[@]}"; do [[ -s $resource ]] || { echo "ERROR: missing explorer resource: $resource" >&2; exit 2; }; done
-findings_root=$(dirname "$root")
-genome_dir=$(dirname "${resources[0]}")
-binds=(--bind "$findings_root:$findings_root")
-[[ $genome_dir == "$findings_root" || $genome_dir == "$findings_root"/* ]] || binds+=(--bind "$genome_dir:$genome_dir")
-exec "$apptainer_bin" exec --cleanenv --no-home --pid "${binds[@]}" --pwd "$root" "$image" python3 "$root/server.py" "$port"
+
+EXPLORER_DIR=${1:?Usage: serve_finding_explorer.sh EXPLORER_DIR [PORT]}
+PORT=${2:-8765}
+APPTAINER=${PGTK_APPTAINER:-$(command -v apptainer || true)}
+PYSAM_IMAGE=${PGTK_PYSAM_IMAGE:-}
+IGV_IMAGE=${PGTK_IGV_REPORTS_IMAGE:-}
+
+EXPLORER_DIR=$(readlink -f "$EXPLORER_DIR")
+test -d "$EXPLORER_DIR" || { echo "ERROR: missing explorer directory: $EXPLORER_DIR" >&2; exit 1; }
+test -x "$APPTAINER" || { echo "ERROR: Apptainer executable not found: $APPTAINER" >&2; exit 1; }
+test -s "$PYSAM_IMAGE" || { echo "ERROR: set PGTK_PYSAM_IMAGE to the pinned Pysam image" >&2; exit 1; }
+test -s "$IGV_IMAGE" || { echo "ERROR: set PGTK_IGV_REPORTS_IMAGE to the pinned igv-reports image" >&2; exit 1; }
+test -s "$EXPLORER_DIR/server.py" || { echo "ERROR: missing server.py" >&2; exit 1; }
+test -s "$EXPLORER_DIR/prepare_event_igv_tracks.py" || { echo "ERROR: missing prepare_event_igv_tracks.py" >&2; exit 1; }
+test -s "$EXPLORER_DIR/explorer_config.json" || { echo "ERROR: missing explorer_config.json" >&2; exit 1; }
+
+"$APPTAINER" exec --cleanenv --no-home "$PYSAM_IMAGE" python3 -c 'import pysam; assert pysam.__version__ == "0.24.0"'
+"$APPTAINER" exec --cleanenv --no-home "$IGV_IMAGE" sh -c 'command -v create_report >/dev/null'
+
+export PGTK_APPTAINER="$APPTAINER"
+export PGTK_PYSAM_IMAGE="$PYSAM_IMAGE"
+export PGTK_IGV_REPORTS_IMAGE="$IGV_IMAGE"
+exec python3 "$EXPLORER_DIR/server.py" "$PORT"
