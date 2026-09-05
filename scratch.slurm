@@ -122,7 +122,7 @@ RESULTS_DIR=$(readlink -f "$RESULTS_DIR") || die 'cannot resolve results directo
 SAMPLESHEET=$(readlink -f "$SAMPLESHEET") || die 'cannot resolve samplesheet'
 PYSAM_IMAGE=$(readlink -f "$PYSAM_IMAGE") || die 'cannot resolve Pysam image'
 ENSEMBL_PEP=$(readlink -f "$ENSEMBL_PEP") || die 'cannot resolve Ensembl peptide FASTA'
-BIND_CANDIDATES=("$PROJECT_DIR" "$WORK_DIR" "$TMP_ROOT" "$NXF_HOME_DIR" "$CONTAINER_CACHE" "$SRA_DIR" "$REFERENCE_DOWNLOADS" "$RESULTS_DIR" "$(dirname "$SAMPLESHEET")")
+BIND_CANDIDATES=("$PROJECT_DIR" "$WORK_DIR" "$TMP_ROOT")
 if [[ -n ${PGTK_BIND_PATHS:-} ]]; then IFS=: read -r -a env_binds <<< "$PGTK_BIND_PATHS"; BIND_CANDIDATES+=("${env_binds[@]}"); fi
 BIND_CANDIDATES+=("${EXTRA_BIND_PATHS[@]}")
 for ((i=0; i<${#PIPELINE_ARGS[@]}; i++)); do

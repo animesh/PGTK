@@ -134,6 +134,161 @@ def complete_validator_pipeline_mode_contract():
         assert (output_root / f"PGTK-complete-validation-{job_id}.tar.gz").is_file()
         assert (output_root / f"PGTK-complete-validation-{job_id}.tar.gz.sha256").is_file()
 
+
+
+def generated_explorer_geometry_contract():
+    import csv
+    import gzip
+    import json
+    import subprocess
+    import sys
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        output = root / "explorer"
+        fields = [
+            "EventID","EvidenceClasses","SourceEvents","Sources","Sample","Gene","Consequence","Impact",
+            "PredictedConsequence","PredictedImpact","Transcript","ProteinChange","Chrom","Position","REF","ALT",
+            "ReadValidationStatus","ValidationExplanation","CountUnit","UniqueAlignments","CallableAlignments",
+            "ExactAltReads","CleanReferenceReads","ExcludedReads","AltFractionAmongClean","CallableFractionAmongExamined",
+        ]
+        rows = [
+            ("SNV1","rna_variant","S1","1","10","A","T","ALT_SUPPORTED",1,0,0),
+            ("INS1","rna_variant","S2","1","20","A","AG","MIXED_ALT_AND_REFERENCE",1,1,0),
+            ("DEL1","rna_variant","S3","1","30","ATG","A","MIXED_ALT_AND_REFERENCE",1,1,0),
+            ("SPL1","splice_junction","S4","2","100","","","NO_CALLABLE_READS",0,0,0),
+            ("FUS1","fusion","S5","3","200","","","NO_CALLABLE_READS",0,0,0),
+        ]
+        with (root / "manifest.tsv").open("w", newline="") as handle:
+            writer=csv.DictWriter(handle,fieldnames=fields,delimiter="\t",lineterminator="\n");writer.writeheader()
+            for event_id,classes,source,chrom,pos,ref,alt,status,exact,clean,excluded in rows:
+                row=dict.fromkeys(fields,"");row.update(EventID=event_id,EvidenceClasses=classes,SourceEvents=source,Sample="TK1",Chrom=chrom,Position=pos,REF=ref,ALT=alt,ReadValidationStatus=status,ValidationExplanation="fixture",CountUnit="alignments",UniqueAlignments=str(exact+clean+excluded),CallableAlignments=str(exact+clean),ExactAltReads=str(exact),CleanReferenceReads=str(clean),ExcludedReads=str(excluded),AltFractionAmongClean=(str(exact/(exact+clean)) if exact+clean else "NA"),CallableFractionAmongExamined=(str((exact+clean)/(exact+clean+excluded)) if exact+clean+excluded else "NA"))
+                writer.writerow(row)
+        event_fields=["Event","Sample","Class","Chrom","Start0","End","Chrom2","Start2_0","End2","Label","Source","Gene","Consequence","Impact","Transcript","ProteinChange"]
+        events=[
+            ["S1","TK1","rna_variant","1","9","10","","","","A>T","x","","","","",""],
+            ["S2","TK1","rna_variant","1","19","20","","","","A>AG","x","","","","",""],
+            ["S3","TK1","rna_variant","1","29","32","","","","ATG>A","x","","","","",""],
+            ["S4","TK1","splice_junction","2","99","150","","","","JUNCTION","x","","","","",""],
+            ["S5","TK1","fusion","3","199","200","4","299","300","A--B","x","","","","",""],
+        ]
+        with (root / "events.tsv").open("w",newline="") as handle:
+            writer=csv.writer(handle,delimiter="\t",lineterminator="\n");writer.writerow(event_fields);writer.writerows(events)
+        (root / "excluded.tsv").write_text("EventID\tReason\n")
+        (root / "bam_manifest.tsv").write_text("Sample\tCategory\tBAM\tIndex\tUniqueAlignments\n")
+        with gzip.open(root / "display.tsv.gz","wt") as handle:
+            handle.write("EventID\tSample\tCategory\tAlignmentKey\tReadName\tContig\tStart0\tFlag\tCIGAR\tSequenceHash\n")
+            handle.write("SPL1\tTK1\tevent_display\tk1\tr1\t2\t90\t0\t60M\th1\n")
+            handle.write("FUS1\tTK1\tevent_display\tk2\tr2\t3\t190\t0\t60M\th2\n")
+        (root / "genome.fa").write_text(">1\nA\n")
+        completed=subprocess.run([sys.executable,str(ROOT/'build_finding_explorer.py'),'--manifest',str(root/'manifest.tsv'),'--events',str(root/'events.tsv'),'--excluded-reads',str(root/'excluded.tsv'),'--bam-manifest',str(root/'bam_manifest.tsv'),'--display-manifest',str(root/'display.tsv.gz'),'--genome',str(root/'genome.fa'),'--output-dir',str(output)],capture_output=True,text=True)
+        assert completed.returncode==0,completed.stdout+completed.stderr
+        geometry=json.loads((output/'event_geometry.json').read_text())
+        assert geometry['SNV1']['event_type']=='SNV' and geometry['SNV1']['regions'][0]['start0']==9
+        assert geometry['INS1']['event_type']=='INSERTION' and geometry['INS1']['regions'][0]['end0']==20
+        assert geometry['DEL1']['event_type']=='DELETION' and geometry['DEL1']['regions'][0]['end0']==32
+        assert geometry['SPL1']['event_type']=='SPLICE_JUNCTION' and geometry['SPL1']['regions']==[{'chrom':'2','start0':99,'end0':150,'role':'JUNCTION'}]
+        assert geometry['FUS1']['event_type']=='FUSION' and len(geometry['FUS1']['regions'])==2
+        compile((output/'server.py').read_text(),str(output/'server.py'),'exec')
+        with gzip.open(output/'partitions/all.jsonl.gz','rt') as handle:
+            records={row['EventID']:row for row in map(json.loads,handle)}
+        assert records['SPL1']['VisualEvidenceStatus']=='CONTEXT_ALIGNMENTS_AVAILABLE'
+        assert records['FUS1']['ContextAlignments']==1
+        import importlib.util
+        import os
+        import shutil
+        for helper in ('report_legend.py','prepare_event_igv_tracks.py'):
+            shutil.copy2(ROOT/helper,output/helper)
+        reviews=root/'finding_reviews';reviews.mkdir();shutil.copy2(root/'display.tsv.gz',reviews/'display.tsv.gz')
+        pysam_image=root/'pysam.img';igv_image=root/'igv.img';pysam_image.write_bytes(b'image');igv_image.write_bytes(b'image')
+        os.environ['PGTK_PYSAM_IMAGE']=str(pysam_image);os.environ['PGTK_IGV_REPORTS_IMAGE']=str(igv_image)
+        specification=importlib.util.spec_from_file_location('generated_explorer_server',output/'server.py')
+        server=importlib.util.module_from_spec(specification);specification.loader.exec_module(server)
+        assert server.search({'event_type':['FUSION']})['total'] == 1
+        assert server.search({'event_type':['SPLICE_JUNCTION']})['rows'][0]['EventID'] == 'SPL1'
+        assert server.REPORT_CACHE_VERSION=='6-persistent-event-panel'
+        assert server.event_description(server.I['SNV1'],server.G['SNV1'])['action']=='SUBSTITUTE A WITH T AT chr1:10'
+        assert server.event_description(server.I['INS1'],server.G['INS1'])=={'action':'INSERT G AFTER chr1:20 A','reference':'A','alternate':'A[G]'}
+        assert server.event_description(server.I['DEL1'],server.G['DEL1'])=={'action':'DELETE TG AFTER chr1:30 A','reference':'A[TG]','alternate':'A'}
+        assert server.event_description(server.I['SPL1'],server.G['SPL1'])['action']=='SPLICE chr2:100 TO chr2:150'
+        assert server.event_description(server.I['FUS1'],server.G['FUS1'])['action']=='FUSE chr3:200 TO chr4:300'
+        ddx_row=dict(server.I['INS1'],EventID='DDX1_TK12_2_15597434_C_CA_C_CA',Sample='TK12',Gene='DDX1',Chrom='2',Position=15597434,REF='C',ALT='CA',ExactAltReads=3,CleanReferenceReads=813,ExcludedReads=161,CallableReads=816,AltFractionAmongClean=3/816)
+        ddx_geometry={'event_type':'INSERTION','regions':[{'chrom':'2','start0':15597433,'end0':15597434,'role':'TARGET_ALLELE'}]}
+        ddx_description=server.event_description(ddx_row,ddx_geometry)
+        assert ddx_description=={'action':'INSERT A AFTER chr2:15,597,434 C','reference':'C','alternate':'C[A]'}
+        ddx_summary=server.event_summary_html(ddx_row,ddx_geometry,ddx_description)
+        assert 'id="pgtk-event-summary"' in ddx_summary and 'position:sticky' in ddx_summary
+        assert 'INSERT A AFTER chr2:15,597,434 C' in ddx_summary and 'chr2:15,597,435' in ddx_summary
+        assert 'Purple I symbols at the target boundary' in ddx_summary
+        loader=server.persistent_summary_script(ddx_summary)
+        assert 'pgtk-event-summary-loader' in loader and 'MutationObserver' in loader and 'container.insertBefore' in loader
+        import threading
+        import urllib.request
+        httpd=server.ThreadingHTTPServer(('127.0.0.1',0),server.H)
+        thread=threading.Thread(target=httpd.serve_forever,daemon=True);thread.start()
+        proxy_free_opener=urllib.request.build_opener(
+            urllib.request.ProxyHandler({})
+        )
+        try:
+            port=httpd.server_address[1]
+            with proxy_free_opener.open(
+                f'http://127.0.0.1:{port}/api/findings?event_type=FUSION',
+                timeout=10,
+            ) as response:
+                payload=json.loads(response.read())
+            assert payload['total']==1 and payload['rows'][0]['EventID']=='FUS1'
+            with proxy_free_opener.open(
+                f'http://127.0.0.1:{port}/api/facets',
+                timeout=10,
+            ) as response:
+                facets=json.loads(response.read())
+            assert {'FUSION','SPLICE_JUNCTION','SNV','INSERTION','DELETION'}.issubset(set(facets['event_types']))
+        finally:
+            httpd.shutdown();httpd.server_close();thread.join(timeout=5)
+        commands=[]
+        def fake_run(command,label):
+            commands.append((label,list(command)))
+            if label=='event BAM extraction':
+                event_output=Path(command[command.index('--output-dir')+1]);bam=event_output/'event_display.bam';bam.write_bytes(b'BAM');(event_output/'tracks.tsv').write_text(f'Category\tBAM\tIndex\nevent_display\t{bam}\t{bam}.bai\n')
+            else:
+                report_output=Path(command[command.index('--output')+1]);report_output.write_text('<html><body><div id="container" style="display:flex">fixture</div></body></html>')
+        server.run=fake_run
+        expected={
+            'SNV1':('1','9','10','SNV','10','A','T'),
+            'INS1':('1','19','20','INSERTION','20','A','AG'),
+            'DEL1':('1','29','32','DELETION','32','ATG','A'),
+        }
+        for event_id,(chrom,start0,end0,event_type,site_end,ref,alt) in expected.items():
+            report=server.report(event_id);assert report.is_file()
+            event_dir=next(path for path in server.K.glob(event_id+'-*') if path.is_dir())
+            marker_fields=[line for line in (event_dir/'event_coordinate.bed').read_text().splitlines() if not line.startswith('track')][0].split('\t')
+            assert marker_fields[:3]==[chrom,start0,end0]
+            description=server.event_description(server.I[event_id],server.G[event_id])
+            assert description['action'] in marker_fields[3] and 'TARGET_ALLELE' in marker_fields[3]
+            with (event_dir/'finding.tsv').open(newline='',encoding='utf-8') as handle:
+                site_row=next(csv.DictReader(handle,delimiter='\t'))
+            assert site_row['Start']==str(int(start0)+1) and site_row['End']==site_end
+            assert site_row['REF']==ref and site_row['ALT']==alt and site_row['EventType']==event_type
+            report_command=[command for label,command in commands if label=='IGV report generation'][-1]
+            track_index=report_command.index('--tracks')
+            assert report_command[track_index+1].endswith('event_coordinate.bed')
+            report_text=report.read_text()
+            assert report_text.count('id="pgtk-event-summary"')==1
+            assert report_text.count('id="pgtk-event-summary-loader"')==1
+            assert description['action'] in report_text and 'MutationObserver' in report_text
+            assert report_text.index('id="pgtk-event-summary"') < report_text.index('fixture')
+            before=len(commands);assert server.report(event_id)==report;assert len(commands)==before
+        server.report('FUS1');fusion_dir=next(path for path in server.K.glob('FUS1-*') if path.is_dir());fusion_marker=(fusion_dir/'event_coordinate.bed').read_text()
+        assert 'FUSE chr3:200 TO chr4:300' in fusion_marker and 'BREAKPOINT_1' in fusion_marker and 'BREAKPOINT_2' in fusion_marker
+        with (fusion_dir/'finding.tsv').open(newline='',encoding='utf-8') as handle:
+            fusion_rows=list(csv.DictReader(handle,delimiter='\t'))
+        assert len(fusion_rows)==2 and {row['RegionRole'] for row in fusion_rows}=={'BREAKPOINT_1','BREAKPOINT_2'}
+        server.report('SPL1');splice_dir=next(path for path in server.K.glob('SPL1-*') if path.is_dir());splice_marker=(splice_dir/'event_coordinate.bed').read_text()
+        assert '\t99\t150\tSPLICE chr2:100 TO chr2:150 | JUNCTION' in splice_marker
+
+generated_explorer_geometry_contract()
+
 samplesheet_validator_contract()
 complete_validator_process_name_contract()
 complete_validator_pipeline_mode_contract()

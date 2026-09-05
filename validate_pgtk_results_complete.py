@@ -178,8 +178,34 @@ def main() -> int:
         check("Failure ledger empty", ledger.is_file() and not ledger_rows, f"path={ledger}, rows={len(ledger_rows)}")
 
     # Published findings validator.
-    findings = results / "igv" / "findings" / "finding_explorer" / "partitions" / "all.jsonl.gz"
+    explorer_root = results / "igv" / "findings" / "finding_explorer"
+    findings = explorer_root / "partitions" / "all.jsonl.gz"
+    geometry = explorer_root / "event_geometry.json"
+    config = explorer_root / "explorer_config.json"
+    server = explorer_root / "server.py"
     validator = project / "validate_published_findings.py"
+    check("Finding Explorer geometry", geometry.is_file() and geometry.stat().st_size > 0, str(geometry))
+    check("Finding Explorer config", config.is_file() and config.stat().st_size > 0, str(config))
+    check("Finding Explorer generated server", server.is_file() and server.stat().st_size > 0, str(server))
+    if config.is_file() and geometry.is_file():
+        try:
+            config_data = json.loads(config.read_text(encoding="utf-8"))
+            geometry_data = json.loads(geometry.read_text(encoding="utf-8"))
+            check("Finding Explorer geometry count", int(config_data.get("findings", -1)) == len(geometry_data), f"config={config_data.get('findings')}, geometry={len(geometry_data)}")
+            valid_regions = all(item.get("regions") and all(region.get("chrom") and int(region["start0"]) >= 0 and int(region["end0"]) > int(region["start0"]) for region in item["regions"]) for item in geometry_data.values())
+            valid_structural_roles = all(
+                ({region.get("role") for region in item["regions"]} == {"BREAKPOINT_1", "BREAKPOINT_2"} and len(item["regions"]) >= 2)
+                if item.get("event_type") == "FUSION" else
+                all(region.get("role") == "JUNCTION" for region in item["regions"])
+                if item.get("event_type") == "SPLICE_JUNCTION" else True
+                for item in geometry_data.values()
+            )
+            check("Finding Explorer structural geometry", valid_regions and valid_structural_roles, f"events={len(geometry_data)}; regions={valid_regions}; roles={valid_structural_roles}")
+        except Exception as exc:
+            check("Finding Explorer structured metadata", False, str(exc))
+    if server.is_file():
+        generated = run([str(args.host_python), "-m", "py_compile", str(server)], cwd=project, log=output / "finding_explorer_server_compile.log")
+        check("Finding Explorer server compilation", generated.returncode == 0, (generated.stdout or "").strip() or "compiled")
     if validator.is_file() and findings.is_file():
         published = run([str(args.host_python), str(validator), str(findings)], cwd=project, log=output / "published_findings_validation.log")
         check("Published findings validator", published.returncode == 0, f"exit={published.returncode}")

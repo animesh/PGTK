@@ -220,7 +220,17 @@ def audit(project: Path, results: Path, job_id: str, output_root: Path, hash_lar
 
     empty_files = [path for path in files if path.stat().st_size == 0]
     allowed_empty_patterns = ("failure_ledger.tsv", ".gitkeep")
-    suspicious_empty = [p for p in empty_files if not p.name.endswith(allowed_empty_patterns)]
+    allowed_empty_picard = {
+        "picard_MarkIlluminaAdapters_histogram.txt",
+        "picard_MeanQualityByCycle_histogram.txt",
+        "picard_MeanQualityByCycle_histogram_1.txt",
+        "picard_QualityScoreDistribution_histogram.txt",
+    }
+    suspicious_empty = [
+        path for path in empty_files
+        if not path.name.endswith(allowed_empty_patterns)
+        and not ("qc/multiqc_report_data/" in rel(path, results) and path.name in allowed_empty_picard)
+    ]
     add(checks, "inventory", "unexpected empty files", "PASS" if not suspicious_empty else "WARN",
         "none" if not suspicious_empty else ", ".join(rel(p, results) for p in suspicious_empty[:100]))
 
@@ -337,8 +347,14 @@ def audit(project: Path, results: Path, job_id: str, output_root: Path, hash_lar
             indexes = [Path(str(alignment) + ".bai"), alignment.with_suffix(".bai")]
         else:
             indexes = [Path(str(alignment) + ".crai"), alignment.with_suffix(".crai")]
-        add(checks, "alignment", "alignment index", "PASS" if any(p.is_file() for p in indexes) else "FAIL",
-            "index present" if any(p.is_file() for p in indexes) else "index missing", rpath)
+        existing_indexes = [path for path in indexes if path.is_file()]
+        add(checks, "alignment", "alignment index", "PASS" if existing_indexes else "FAIL",
+            "index present" if existing_indexes else "index missing", rpath)
+        if existing_indexes:
+            newest_index = max(existing_indexes, key=lambda path: path.stat().st_mtime_ns)
+            index_current = newest_index.stat().st_mtime_ns >= alignment.stat().st_mtime_ns
+            freshness = "index timestamp current" if index_current else "index timestamp older than alignment; regenerate the index after rewriting the alignment"
+            add(checks, "alignment", "alignment index freshness", "PASS" if index_current else "WARN", freshness, rpath)
         if samtools:
             rc, output = run_command([samtools, "quickcheck", "-v", str(alignment)], timeout=600)
             add(checks, "alignment", "samtools quickcheck", "PASS" if rc == 0 else "FAIL", output or "OK", rpath)

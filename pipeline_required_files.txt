@@ -9,6 +9,7 @@ analyze_pipeline_trace.py
 analyze_progression_biology.py
 analyze_variant_landscape.py
 annotate_variant_peptides.py
+audit_pgtk_results.py
 build_compact_multiqc_content.py
 build_comparative_advantage_report.py
 build_complete_report.py
@@ -33,6 +34,7 @@ merge_progression_biology.py
 merge_variant_validation.py
 multiqc_config.yaml
 nextflow.config
+pipeline_required_files.txt
 prepare_event_igv_tracks.py
 prepare_go_annotations.py
 proteogenomics_evidence_report.py

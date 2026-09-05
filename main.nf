@@ -1519,13 +1519,13 @@ process COMPARE_PROGRESSION_PAIR {
     publishDir "${params.outdir}/progression_biology/pairs", mode:'copy'
     input:
     tuple val(pair_meta), path(alleles_a), path(genes_a), path(go_a), path(alleles_b), path(genes_b), path(go_b)
-    path comparison_script
+    path progression_pair_script
     output:
     tuple val(pair_meta), path("${pair_meta.pair_id}.progression_pair.alleles.tsv"), path("${pair_meta.pair_id}.progression_pair.genes.tsv"), path("${pair_meta.pair_id}.progression_pair.go_contrasts.tsv"), path("${pair_meta.pair_id}.progression_pair.summary.tsv")
     script:
     """
     set -euo pipefail
-    python3 ${comparison_script} --subject ${pair_meta.subject} --sample-a ${pair_meta.sample_a} --sample-b ${pair_meta.sample_b} --alleles-a ${alleles_a} --alleles-b ${alleles_b} --genes-a ${genes_a} --genes-b ${genes_b} --go-a ${go_a} --go-b ${go_b} --output-prefix ${pair_meta.pair_id}.progression_pair
+    python3 ${progression_pair_script} --subject ${pair_meta.subject} --sample-a ${pair_meta.sample_a} --sample-b ${pair_meta.sample_b} --alleles-a ${alleles_a} --alleles-b ${alleles_b} --genes-a ${genes_a} --genes-b ${genes_b} --go-a ${go_a} --go-b ${go_b} --output-prefix ${pair_meta.pair_id}.progression_pair
     """
 }
 process MERGE_PROGRESSION_BIOLOGY {
@@ -1705,6 +1705,7 @@ process BUILD_FINDING_EXPLORER {
     publishDir "${params.outdir}/igv/findings", mode:'copy'
     input:
     path finding_reviews
+    path source_events
     path genome
     path explorer_script
     path server_launcher
@@ -1716,10 +1717,13 @@ process BUILD_FINDING_EXPLORER {
     """
     set -euo pipefail
     mkdir -p finding_explorer
-    python3 ${explorer_script} --manifest ${finding_reviews}/findings_manifest.tsv --excluded-reads ${finding_reviews}/excluded_reads.tsv --bam-manifest ${finding_reviews}/bam_manifest.tsv --display-manifest ${finding_reviews}/display_alignment_manifest.tsv.gz --genome ${genome} --flanking ${params.read_validation_padding} --output-dir finding_explorer
+    python3 ${explorer_script} --manifest ${finding_reviews}/findings_manifest.tsv --events ${source_events} --excluded-reads ${finding_reviews}/excluded_reads.tsv --bam-manifest ${finding_reviews}/bam_manifest.tsv --display-manifest ${finding_reviews}/display_alignment_manifest.tsv.gz --genome ${genome} --flanking ${params.read_validation_padding} --output-dir finding_explorer
     cp ${server_launcher} finding_explorer/serve_explorer.sh
     cp ${report_legend_script} finding_explorer/report_legend.py
     cp ${event_track_script} finding_explorer/prepare_event_igv_tracks.py
+    python3 -m py_compile finding_explorer/server.py finding_explorer/report_legend.py finding_explorer/prepare_event_igv_tracks.py
+    python3 -c 'import json; config=json.load(open("finding_explorer/explorer_config.json")); geometry=json.load(open("finding_explorer/event_geometry.json")); assert config["findings"] == len(geometry)'
+    bash -n finding_explorer/serve_explorer.sh
     test -s finding_explorer/report_legend.py
     test -s finding_explorer/prepare_event_igv_tracks.py
     total=\$(awk -F': ' '\$1=="Findings" {print \$2}' finding_explorer/coverage_summary.txt)
@@ -1758,7 +1762,7 @@ process BUILD_COMPARATIVE_ADVANTAGE_REPORT {
     path external_comparison_tables
     path codon_summary
     path provenance_summary
-    path report_script
+    path comparative_report_script
     output:
     path 'comparative_advantage.report.md', emit: report
     path 'comparative_advantage.variant_stage_inventory.tsv', emit: variant_inventory
@@ -1768,7 +1772,7 @@ process BUILD_COMPARATIVE_ADVANTAGE_REPORT {
     path 'comparative_advantage.multiqc_summary.tsv', emit: multiqc_summary
     script:
     """
-    python ${report_script} --samples ${samplesheet} --raw-vcf ${raw_vcfs} --pass-vcf ${pass_vcfs} --rna-vcf ${rna_vcfs} --progression-vcf ${progression_vcfs} --fusion-table ${fusion_tables} --splice-detail ${splice_details} --variant-fasta ${variant_fastas} --fusion-fasta ${fusion_fastas} --splice-fasta ${splice_fastas} --combined-fasta ${combined_fastas} --stage-qc ${stage_qc_tables} --external-comparison ${external_comparison_tables} --codon-summary ${codon_summary} --provenance-summary ${provenance_summary} --output-prefix comparative_advantage
+    python ${comparative_report_script} --samples ${samplesheet} --raw-vcf ${raw_vcfs} --pass-vcf ${pass_vcfs} --rna-vcf ${rna_vcfs} --progression-vcf ${progression_vcfs} --fusion-table ${fusion_tables} --splice-detail ${splice_details} --variant-fasta ${variant_fastas} --fusion-fasta ${fusion_fastas} --splice-fasta ${splice_fastas} --combined-fasta ${combined_fastas} --stage-qc ${stage_qc_tables} --external-comparison ${external_comparison_tables} --codon-summary ${codon_summary} --provenance-summary ${provenance_summary} --output-prefix comparative_advantage
     """
 }
 
@@ -2606,7 +2610,7 @@ workflow {
         finding_explorer_launcher=file("${projectDir}/serve_finding_explorer.sh",checkIfExists:true)
         finding_explorer_legend=file("${projectDir}/report_legend.py",checkIfExists:true)
         finding_explorer_tracks=file("${projectDir}/prepare_event_igv_tracks.py",checkIfExists:true)
-        finding_explorer=BUILD_FINDING_EXPLORER(finding_reviews.reviews, refs.genome, finding_explorer_script, finding_explorer_launcher, finding_explorer_legend, finding_explorer_tracks)
+        finding_explorer=BUILD_FINDING_EXPLORER(finding_reviews.reviews, igv_bundle.events, refs.genome, finding_explorer_script, finding_explorer_launcher, finding_explorer_legend, finding_explorer_tracks)
         catalogue_explorer_ready = finding_explorer.explorer
     }
     comparative_report_script=file("${projectDir}/build_comparative_advantage_report.py", checkIfExists:true)

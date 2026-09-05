@@ -1,4 +1,4 @@
-# PGTK Production Pipeline
+# PGTK pipeline
 
 PGTK is a Nextflow DSL2 workflow for RNA-seq quality control, alignment, expression analysis, RNA-observed variant calling, fusion and splice analysis, longitudinal baseline comparison, GO enrichment, exploratory proteogenomic FASTA generation, IGV evidence review, optional external-VCF comparison, optional MaxQuant evidence integration, consolidated reporting, and exhaustive final validation.
 
@@ -146,38 +146,145 @@ Rules:
 
 The normalized design report is published to `results/qc/samplesheet/samplesheet_design.tsv`.
 
-## Saga quick start
+## Installation and production quick start
 
-Download scripts require internet access. Run them directly on a Saga login node, never through Slurm compute nodes.
+PGTK is configured through runtime values. The repository may be cloned or unpacked anywhere. Generic commands are shown first, followed by a complete Saga example matching the tested installation.
+
+Download operations require internet access. On Saga, run `download_assets.sh` and `download_sra.sh` directly on a login node, never through Slurm compute nodes.
+
+### Generic runtime configuration
+
+Enter the repository and resolve its absolute path:
 
 ```bash
-git clone https://github.com/animesh/PGTK
-cd PGTK
+cd /path/to/PGTK
+export PROJECT_ROOT=$(pwd -P)
+```
+
+Set scheduler values and derive project-local paths:
+
+```bash
+export PGTK_ACCOUNT='your_slurm_account'
+export PGTK_NORMAL_PARTITION='your_normal_partition'
+export PGTK_BIGMEM_PARTITION='your_bigmem_partition'
+
+export RESULTS_DIR=${PGTK_RESULTS_DIR:-"$PROJECT_ROOT/results"}
+export WORK_ROOT=${PGTK_WORK_ROOT:-"${WORK:-$PROJECT_ROOT/runtime}"}
+export NXF_HOME_DIR=${PGTK_NXF_HOME:-"$PROJECT_ROOT/.nextflow_home"}
+export JAVA_MODULE=${PGTK_JAVA_MODULE:-Java/21}
+
+export NEXTFLOW_BIN=${PGTK_NEXTFLOW:-$(command -v nextflow || true)}
+export PYTHON_BIN=${PGTK_PYTHON:-$(command -v python3 || true)}
+export APPTAINER_BIN=${PGTK_APPTAINER:-$(command -v apptainer || true)}
+
+module load "$JAVA_MODULE"
+
+test -n "$NEXTFLOW_BIN" && test -x "$NEXTFLOW_BIN"
+test -n "$PYTHON_BIN" && test -x "$PYTHON_BIN"
+test -n "$APPTAINER_BIN" && test -x "$APPTAINER_BIN"
+
+mkdir -p \
+  "$RESULTS_DIR" \
+  "$WORK_ROOT/pgtk-work" \
+  "$WORK_ROOT/pgtk-tmp" \
+  "$NXF_HOME_DIR"
+```
+
+### Saga tested runtime values
+
+The following concrete profile matches the tested Saga installation and may be copied directly by the current project user:
+
+```bash
+cd /cluster/projects/nn9036k/scrbkup/PGTK
+
+export PROJECT_ROOT=$(pwd -P)
+export DATA_ROOT="$PROJECT_ROOT"
+export RESULTS_DIR="$DATA_ROOT/results"
+export WORK_ROOT=/cluster/work/users/ash022/PGTK-production
+export NXF_HOME_DIR="$DATA_ROOT/.nextflow_home"
+
+export PGTK_ACCOUNT=nn9036k
+export PGTK_NORMAL_PARTITION=normal
+export PGTK_BIGMEM_PARTITION=bigmem
+
+export NEXTFLOW_BIN=/cluster/home/ash022/bin/nextflow
+export PYTHON_BIN=/cluster/software/Mamba/4.14.0-0/bin/python3
+export APPTAINER_BIN=/usr/bin/apptainer
+export JAVA_MODULE=Java/21
+
+module load "$JAVA_MODULE"
+
+mkdir -p \
+  "$RESULTS_DIR" \
+  "$WORK_ROOT/pgtk-work" \
+  "$WORK_ROOT/pgtk-tmp" \
+  "$NXF_HOME_DIR"
+
+java -version
+"$NEXTFLOW_BIN" -version
+"$PYTHON_BIN" --version
+"$APPTAINER_BIN" --version
+```
+
+To reproduce the already validated results tree discussed in the production record, use these values instead:
+
+```bash
+export RESULTS_DIR="$DATA_ROOT/results-validation-20260904"
+export WORK_ROOT=/cluster/work/users/ash022/PGTK-validation-20260904
+export NXF_HOME_DIR="$DATA_ROOT/.nextflow_home-validation-20260904"
+```
+
+Do not mix a new results directory with an old work directory unless intentionally resuming the same run.
+
+### Download assets
+
+Generic:
+
+```bash
+cd "$PROJECT_ROOT"
 bash download_assets.sh
 bash download_sra.sh
 ```
 
-Declare runtime values:
+Saga tested example, run on the login node:
 
 ```bash
-DATA_ROOT=$PWD
-WORK_ROOT=$WORK
-PYTHON_PATH=/cluster/software/Mamba/4.14.0-0/bin/python3
-APPTAINER_PATH=/usr/bin/apptainer
-SLURM_ACCOUNT=nn9036k
-NF_PATH=/cluster/home/ash022/bin/nextflow
-PART_NORM=normal
-PART_BIG=bigmem
-module load Java/21.0.2
+cd /cluster/projects/nn9036k/scrbkup/PGTK
+bash download_assets.sh
+bash download_sra.sh
 ```
 
-Validate the source with the real Saga executables:
+Expected project-local asset roots:
+
+```text
+reference_downloads/
+singularity_cache/
+sra_cache/
+```
+
+### Validate source contracts
+
+Generic:
 
 ```bash
+cd "$PROJECT_ROOT"
+
+bash validate_pipeline_commands.sh \
+  --project-dir "$PROJECT_ROOT" \
+  --nextflow "$NEXTFLOW_BIN" \
+  --python "$PYTHON_BIN"
+```
+
+Saga tested example:
+
+```bash
+cd /cluster/projects/nn9036k/scrbkup/PGTK
+module load Java/21
+
 bash validate_pipeline_commands.sh \
   --project-dir "$PWD" \
-  --nextflow "$NF_PATH" \
-  --python "$PYTHON_PATH"
+  --nextflow /cluster/home/ash022/bin/nextflow \
+  --python /cluster/software/Mamba/4.14.0-0/bin/python3
 ```
 
 Required ending:
@@ -187,33 +294,72 @@ FAIL: 0
 RESULT: PASSED
 ```
 
-## Preflight-only submission
+### Preflight-only submission
+
+Generic:
 
 ```bash
+cd "$PROJECT_ROOT"
+
 PREFLIGHT_JOB_ID=$(sbatch --parsable \
-  --account="$SLURM_ACCOUNT" \
+  --account="$PGTK_ACCOUNT" \
   scratch.slurm \
   --preflight-only \
-  --account "$SLURM_ACCOUNT" \
-  --normal-partition "$PART_NORM" \
-  --bigmem-partition "$PART_BIG" \
-  --project-dir "$PWD" \
+  --account "$PGTK_ACCOUNT" \
+  --normal-partition "$PGTK_NORMAL_PARTITION" \
+  --bigmem-partition "$PGTK_BIGMEM_PARTITION" \
+  --project-dir "$PROJECT_ROOT" \
   --work-dir "$WORK_ROOT/pgtk-work" \
-  --results-dir "$DATA_ROOT/results" \
-  --reference-downloads "$DATA_ROOT/reference_downloads" \
-  --container-cache "$DATA_ROOT/singularity_cache" \
-  --sra-dir "$DATA_ROOT/sra_cache" \
+  --results-dir "$RESULTS_DIR" \
+  --reference-downloads "$PROJECT_ROOT/reference_downloads" \
+  --container-cache "$PROJECT_ROOT/singularity_cache" \
+  --sra-dir "$PROJECT_ROOT/sra_cache" \
   --tmp-root "$WORK_ROOT/pgtk-tmp" \
-  --nxf-home "$DATA_ROOT/.nextflow_home" \
-  --samplesheet "$DATA_ROOT/samples.csv" \
-  --ensembl-pep "$DATA_ROOT/reference_downloads/Homo_sapiens.GRCh38.pep.all.fa.gz" \
-  --pysam-image "$DATA_ROOT/singularity_cache/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img" \
-  --nextflow "$NF_PATH" \
-  --python "$PYTHON_PATH" \
-  --apptainer "$APPTAINER_PATH" \
-  --java-module Java/21.0.2 \
+  --nxf-home "$NXF_HOME_DIR" \
+  --samplesheet "$PROJECT_ROOT/samples.csv" \
+  --ensembl-pep "$PROJECT_ROOT/reference_downloads/Homo_sapiens.GRCh38.pep.all.fa.gz" \
+  --pysam-image "$PROJECT_ROOT/singularity_cache/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img" \
+  --nextflow "$NEXTFLOW_BIN" \
+  --python "$PYTHON_BIN" \
+  --apptainer "$APPTAINER_BIN" \
+  --java-module "$JAVA_MODULE" \
+  --slurm-log-template "$PROJECT_ROOT/pgtk-wrapper-{job_id}.log" \
+  --)
+
+printf '%s\n' "$PREFLIGHT_JOB_ID" | tee "$PROJECT_ROOT/.pgtk_current_preflight_job_id"
+tail -F "$PROJECT_ROOT/pgtk-wrapper-${PREFLIGHT_JOB_ID}.log"
+```
+
+Saga tested example:
+
+```bash
+cd /cluster/projects/nn9036k/scrbkup/PGTK
+
+PREFLIGHT_JOB_ID=$(sbatch --parsable \
+  --account=nn9036k \
+  scratch.slurm \
+  --preflight-only \
+  --account nn9036k \
+  --normal-partition normal \
+  --bigmem-partition bigmem \
+  --project-dir "$PWD" \
+  --work-dir /cluster/work/users/ash022/PGTK-production/pgtk-work \
+  --results-dir "$PWD/results" \
+  --reference-downloads "$PWD/reference_downloads" \
+  --container-cache "$PWD/singularity_cache" \
+  --sra-dir "$PWD/sra_cache" \
+  --tmp-root /cluster/work/users/ash022/PGTK-production/pgtk-tmp \
+  --nxf-home "$PWD/.nextflow_home" \
+  --samplesheet "$PWD/samples.csv" \
+  --ensembl-pep "$PWD/reference_downloads/Homo_sapiens.GRCh38.pep.all.fa.gz" \
+  --pysam-image "$PWD/singularity_cache/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img" \
+  --nextflow /cluster/home/ash022/bin/nextflow \
+  --python /cluster/software/Mamba/4.14.0-0/bin/python3 \
+  --apptainer /usr/bin/apptainer \
+  --java-module Java/21 \
   --slurm-log-template "$PWD/pgtk-wrapper-{job_id}.log" \
   --)
+
 printf '%s\n' "$PREFLIGHT_JOB_ID" | tee .pgtk_current_preflight_job_id
 tail -F "pgtk-wrapper-${PREFLIGHT_JOB_ID}.log"
 ```
@@ -225,36 +371,82 @@ PASS: COMPLETE PRE-SUBMISSION RUNTIME VALIDATION
 PASS: preflight-only mode completed; Nextflow was not launched
 ```
 
-## Production submission and resume
+### Production submission and resume
 
-`scratch.slurm` always launches Nextflow with `-resume`.
+`scratch.slurm` always launches Nextflow with `-resume`. A retry must reuse the same project, work, results, temporary, and `NXF_HOME` paths. Do not delete those paths after a failed run.
+
+Generic:
 
 ```bash
+cd "$PROJECT_ROOT"
+
 JOB_ID=$(sbatch --parsable \
-  --account="$SLURM_ACCOUNT" \
+  --account="$PGTK_ACCOUNT" \
   scratch.slurm \
-  --account "$SLURM_ACCOUNT" \
-  --normal-partition "$PART_NORM" \
-  --bigmem-partition "$PART_BIG" \
-  --project-dir "$PWD" \
+  --account "$PGTK_ACCOUNT" \
+  --normal-partition "$PGTK_NORMAL_PARTITION" \
+  --bigmem-partition "$PGTK_BIGMEM_PARTITION" \
+  --project-dir "$PROJECT_ROOT" \
   --work-dir "$WORK_ROOT/pgtk-work" \
-  --results-dir "$DATA_ROOT/results" \
-  --reference-downloads "$DATA_ROOT/reference_downloads" \
-  --container-cache "$DATA_ROOT/singularity_cache" \
-  --sra-dir "$DATA_ROOT/sra_cache" \
+  --results-dir "$RESULTS_DIR" \
+  --reference-downloads "$PROJECT_ROOT/reference_downloads" \
+  --container-cache "$PROJECT_ROOT/singularity_cache" \
+  --sra-dir "$PROJECT_ROOT/sra_cache" \
   --tmp-root "$WORK_ROOT/pgtk-tmp" \
-  --nxf-home "$DATA_ROOT/.nextflow_home" \
-  --samplesheet "$DATA_ROOT/samples.csv" \
-  --ensembl-pep "$DATA_ROOT/reference_downloads/Homo_sapiens.GRCh38.pep.all.fa.gz" \
-  --pysam-image "$DATA_ROOT/singularity_cache/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img" \
-  --nextflow "$NF_PATH" \
-  --python "$PYTHON_PATH" \
-  --apptainer "$APPTAINER_PATH" \
-  --java-module Java/21.0.2 \
+  --nxf-home "$NXF_HOME_DIR" \
+  --samplesheet "$PROJECT_ROOT/samples.csv" \
+  --ensembl-pep "$PROJECT_ROOT/reference_downloads/Homo_sapiens.GRCh38.pep.all.fa.gz" \
+  --pysam-image "$PROJECT_ROOT/singularity_cache/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img" \
+  --nextflow "$NEXTFLOW_BIN" \
+  --python "$PYTHON_BIN" \
+  --apptainer "$APPTAINER_BIN" \
+  --java-module "$JAVA_MODULE" \
+  --slurm-log-template "$PROJECT_ROOT/pgtk-wrapper-{job_id}.log" \
+  --)
+
+printf '%s\n' "$JOB_ID" | tee "$PROJECT_ROOT/.pgtk_current_job_id"
+tail -F "$PROJECT_ROOT/pgtk-wrapper-${JOB_ID}.log"
+```
+
+Saga tested example:
+
+```bash
+cd /cluster/projects/nn9036k/scrbkup/PGTK
+
+JOB_ID=$(sbatch --parsable \
+  --account=nn9036k \
+  scratch.slurm \
+  --account nn9036k \
+  --normal-partition normal \
+  --bigmem-partition bigmem \
+  --project-dir "$PWD" \
+  --work-dir /cluster/work/users/ash022/PGTK-production/pgtk-work \
+  --results-dir "$PWD/results" \
+  --reference-downloads "$PWD/reference_downloads" \
+  --container-cache "$PWD/singularity_cache" \
+  --sra-dir "$PWD/sra_cache" \
+  --tmp-root /cluster/work/users/ash022/PGTK-production/pgtk-tmp \
+  --nxf-home "$PWD/.nextflow_home" \
+  --samplesheet "$PWD/samples.csv" \
+  --ensembl-pep "$PWD/reference_downloads/Homo_sapiens.GRCh38.pep.all.fa.gz" \
+  --pysam-image "$PWD/singularity_cache/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img" \
+  --nextflow /cluster/home/ash022/bin/nextflow \
+  --python /cluster/software/Mamba/4.14.0-0/bin/python3 \
+  --apptainer /usr/bin/apptainer \
+  --java-module Java/21 \
   --slurm-log-template "$PWD/pgtk-wrapper-{job_id}.log" \
   --)
+
 printf '%s\n' "$JOB_ID" | tee .pgtk_current_job_id
 tail -F "pgtk-wrapper-${JOB_ID}.log"
+```
+
+Monitor the current job:
+
+```bash
+JOB_ID=$(cat "$PROJECT_ROOT/.pgtk_current_job_id")
+squeue -j "$JOB_ID"
+sacct -j "$JOB_ID" --format=JobID,JobName%35,State,ExitCode,Elapsed,MaxRSS
 ```
 
 ## Integrated final validation
@@ -272,29 +464,96 @@ results/validation/PGTK-deep-audit-<job-id>.tar.gz
 results/validation/PGTK-deep-audit-<job-id>.tar.gz.sha256
 ```
 
-A run is accepted only when Nextflow exits successfully, complete validation reports `Overall: PASS`, deep audit reports `ERROR: 0`, and archive checksum verification succeeds.
+Generic acceptance check:
+
+```bash
+JOB_ID=$(cat "$PROJECT_ROOT/.pgtk_current_job_id")
+VALIDATION_DIR="$RESULTS_DIR/validation"
+
+sacct -j "$JOB_ID" \
+  --format=JobID,JobName%35,State,ExitCode,Elapsed,MaxRSS
+
+grep -E 'Overall|ERROR|WARN|PASS' \
+  "$VALIDATION_DIR/PGTK-complete-validation-$JOB_ID/REPORT.md" \
+  "$VALIDATION_DIR/PGTK-deep-audit-$JOB_ID/REPORT.md"
+
+cd "$VALIDATION_DIR"
+sha256sum -c "PGTK-complete-validation-$JOB_ID.tar.gz.sha256"
+sha256sum -c "PGTK-deep-audit-$JOB_ID.tar.gz.sha256"
+```
+
+Saga tested example for completed job `19733758` and the validated results tree:
+
+```bash
+cd /cluster/projects/nn9036k/scrbkup/PGTK
+
+JOB_ID=19733758
+RESULTS_DIR="$PWD/results-validation-20260904"
+VALIDATION_DIR="$RESULTS_DIR/validation"
+
+sacct -j "$JOB_ID" \
+  --format=JobID,JobName%35,State,ExitCode,Elapsed,MaxRSS
+
+grep -E 'Overall|ERROR|WARN|PASS' \
+  "$VALIDATION_DIR/PGTK-complete-validation-$JOB_ID/REPORT.md" \
+  "$VALIDATION_DIR/PGTK-deep-audit-$JOB_ID/REPORT.md" | head -50
+
+cd "$VALIDATION_DIR"
+sha256sum -c "PGTK-complete-validation-$JOB_ID.tar.gz.sha256"
+sha256sum -c "PGTK-deep-audit-$JOB_ID.tar.gz.sha256"
+```
+
+```text
+Slurm state: COMPLETED
+ExitCode: 0:0
+Complete validation: Overall: PASS
+Deep audit: ERROR: 0
+Both checksum manifests: OK
+```
 
 ## Independent local results audit
 
-`audit_pgtk_results.py` performs a separate read-only audit of a completed `results/` tree. It inventories and hashes results; validates gzip/tar, checksum manifests, tabular files, JSON, XML, VCF/index pairs, BAM/index pairs, BED/BEDPE coordinates, trace states, logs, source syntax, failure ledgers, and final validation archives; then creates a shareable report bundle.
+`audit_pgtk_results.py` performs a separate read-only audit of a completed results tree. It inventories and hashes results; validates gzip/tar archives, checksum manifests, tables, JSON, XML, VCF/index pairs, BAM/index pairs, BED/BEDPE coordinates, trace states, logs, source syntax, failure ledgers, and final validation archives; then creates a shareable bundle.
 
-The auditor discovers `samtools` through `PATH`. To use the pinned Pysam 0.24.0 container and its embedded samtools 1.23.1 implementation, create this temporary wrapper:
+The auditor discovers `samtools` through `PATH`. The wrapper below exposes only `samtools quickcheck` through the pinned Pysam 0.24.0 container. The wrapper uses resolved absolute paths. Do not use `PGTK/...` after already changing into the PGTK directory.
+
+Generic wrapper and audit:
 
 ```bash
-cd PGTK
-AUDIT_BIN=$(mktemp -d /cluster/work/users/ash022/pgtk-pysam-audit.XXXXXX)
-cat > "${AUDIT_BIN}/samtools" <<'EOF'
+cd "$PROJECT_ROOT"
+
+AUDIT_JOB_ID=${AUDIT_JOB_ID:-$(cat "$PROJECT_ROOT/.pgtk_current_job_id")}
+AUDIT_RESULTS_DIR=${AUDIT_RESULTS_DIR:-$RESULTS_DIR}
+PYSAM_IMAGE="$PROJECT_ROOT/singularity_cache/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img"
+AUDIT_BIN=$(mktemp -d "${TMPDIR:-/tmp}/pgtk-pysam-audit.XXXXXX")
+
+cleanup_audit_wrapper() {
+  rm -rf "$AUDIT_BIN"
+}
+trap cleanup_audit_wrapper EXIT
+
+test -s "$PYSAM_IMAGE"
+test -d "$AUDIT_RESULTS_DIR"
+
+cat > "$AUDIT_BIN/samtools" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-PYSAM_IMAGE="PGTK/singularity_cache/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img"
-if [[ "${1:-}" != "quickcheck" ]]; then
-    echo "This wrapper supports only: samtools quickcheck" >&2
-    exit 2
+
+PROJECT_ROOT="$PROJECT_ROOT"
+PYSAM_IMAGE="$PYSAM_IMAGE"
+APPTAINER_BIN="$APPTAINER_BIN"
+
+if [[ "\${1:-}" != "quickcheck" ]]; then
+  echo "This wrapper supports only: samtools quickcheck" >&2
+  exit 2
 fi
 shift
-exec /usr/bin/apptainer exec \
-  --bind PGTK \
-  "$PYSAM_IMAGE" \
+
+exec "\$APPTAINER_BIN" exec \
+  --cleanenv \
+  --no-home \
+  --bind "\$PROJECT_ROOT:\$PROJECT_ROOT" \
+  "\$PYSAM_IMAGE" \
   python3 -c '
 import sys
 import pysam
@@ -303,24 +562,94 @@ try:
 except pysam.utils.SamtoolsError as exc:
     print(exc, file=sys.stderr)
     raise SystemExit(1)
-' "$@"
+' "\$@"
 EOF
-chmod 755 "${AUDIT_BIN}/samtools"
+
+chmod 755 "$AUDIT_BIN/samtools"
+
+TEST_BAM=$(find "$AUDIT_RESULTS_DIR" -type f -name '*.bam' -print -quit)
+test -n "$TEST_BAM"
+PATH="$AUDIT_BIN:$PATH" samtools quickcheck -v "$TEST_BAM"
+
+PATH="$AUDIT_BIN:$PATH" \
+"$PYTHON_BIN" "$PROJECT_ROOT/audit_pgtk_results.py" \
+  --project-dir "$PROJECT_ROOT" \
+  --results-dir "$AUDIT_RESULTS_DIR" \
+  --job-id "$AUDIT_JOB_ID" \
+  --output-dir "$PROJECT_ROOT" \
+  --hash-large-files
+
+sha256sum -c \
+  "$PROJECT_ROOT/PGTK-independent-audit-${AUDIT_JOB_ID}.tar.gz.sha256"
 ```
 
-Run the validator. Replace `19715562` for another run:
+Saga tested example for completed job `19733758`:
 
 ```bash
-PATH="${AUDIT_BIN}:${PATH}" /cluster/software/Mamba/4.14.0-0/bin/python3 \
-  audit_pgtk_results.py \
-  --project-dir PGTK \
-  --results-dir PGTK/results \
-  --job-id 19715562 \
-  --output-dir PGTK \
+cd /cluster/projects/nn9036k/scrbkup/PGTK
+
+PROJECT_ROOT=$(pwd -P)
+AUDIT_JOB_ID=19733758
+AUDIT_RESULTS_DIR="$PROJECT_ROOT/results-validation-20260904"
+PYTHON_BIN=/cluster/software/Mamba/4.14.0-0/bin/python3
+APPTAINER_BIN=/usr/bin/apptainer
+PYSAM_IMAGE="$PROJECT_ROOT/singularity_cache/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img"
+AUDIT_BIN=$(mktemp -d /cluster/work/users/ash022/pgtk-pysam-audit.XXXXXX)
+
+cleanup_audit_wrapper() {
+  rm -rf "$AUDIT_BIN"
+}
+trap cleanup_audit_wrapper EXIT
+
+cat > "$AUDIT_BIN/samtools" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_ROOT="$PROJECT_ROOT"
+PYSAM_IMAGE="$PYSAM_IMAGE"
+APPTAINER_BIN="$APPTAINER_BIN"
+
+if [[ "\${1:-}" != "quickcheck" ]]; then
+  echo "This wrapper supports only: samtools quickcheck" >&2
+  exit 2
+fi
+shift
+
+exec "\$APPTAINER_BIN" exec \
+  --cleanenv \
+  --no-home \
+  --bind "\$PROJECT_ROOT:\$PROJECT_ROOT" \
+  "\$PYSAM_IMAGE" \
+  python3 -c '
+import sys
+import pysam
+try:
+    pysam.samtools.quickcheck(*sys.argv[1:], catch_stdout=False)
+except pysam.utils.SamtoolsError as exc:
+    print(exc, file=sys.stderr)
+    raise SystemExit(1)
+' "\$@"
+EOF
+
+chmod 755 "$AUDIT_BIN/samtools"
+
+TEST_BAM=$(find "$AUDIT_RESULTS_DIR" -type f -name '*.bam' -print -quit)
+test -n "$TEST_BAM"
+PATH="$AUDIT_BIN:$PATH" samtools quickcheck -v "$TEST_BAM"
+
+PATH="$AUDIT_BIN:$PATH" \
+"$PYTHON_BIN" "$PROJECT_ROOT/audit_pgtk_results.py" \
+  --project-dir "$PROJECT_ROOT" \
+  --results-dir "$AUDIT_RESULTS_DIR" \
+  --job-id "$AUDIT_JOB_ID" \
+  --output-dir "$PROJECT_ROOT" \
   --hash-large-files
-rm -rf "${AUDIT_BIN}"
-sha256sum -c PGTK-independent-audit-19715562.tar.gz.sha256
+
+sha256sum -c \
+  "$PROJECT_ROOT/PGTK-independent-audit-${AUDIT_JOB_ID}.tar.gz.sha256"
 ```
+
+The `EXIT` trap removes the temporary wrapper. A successful audit must report `FAIL: 0`, all BAM quickchecks must pass, and the archive checksum must report `OK`.
 
 Outputs:
 
@@ -335,9 +664,9 @@ PGTK-independent-audit-<job-id>.tar.gz
 PGTK-independent-audit-<job-id>.tar.gz.sha256
 ```
 
-### Verified production run 19715562
+### Verified production runs
 
-Independent verification on 3 September 2026 produced:
+Run `19715562` established the independent-audit reference result:
 
 ```text
 Source preflight: 146 PASS, 0 FAIL
@@ -347,9 +676,22 @@ Current failure ledger rows: 0
 Result files: 722
 Result size: 54.3 GiB
 Result files hashed: 722/722
-Audit checks: 656 PASS, 1 WARN, 0 FAIL
+Audit checks after Pysam wrapper: 656 PASS, 1 WARN, 0 FAIL
 Pysam/samtools BAM quickchecks: 18/18 PASS
 Audit bundle SHA-256: 352b70f46d452a14dde9f04215ac23176efc95c1ac57748618a4ef2d9b9b584c
+```
+
+Run `19722244` verified the corrected three-root Apptainer bind contract and completed normally on 4 September 2026:
+
+```text
+Bind roots: project, work, temporary
+Source preflight: 147 PASS, 0 FAIL
+Runtime preflight: PASS
+Containers: 18/18
+Reference assets: 8/8
+SRA archives: 3/3
+Wrapper exit status: 0
+Elapsed wallclock: 5.0 hours
 ```
 
 ## Optional external VCF comparison
@@ -383,17 +725,88 @@ Run PGTK first with the branch disabled, search the published sample FASTAs exte
 
 Required inputs are `peptides.txt`, `evidence.txt`, `msms.txt`, `proteinGroups.txt`, `mqpar.xml`, searched FASTAs, and the contaminants FASTA.
 
-## Finding Explorer
+## Runtime bind and first-run contract
 
-The explorer is published under `results/igv/findings/finding_explorer/`. Set the pinned images and launch from the project root:
+The default Apptainer bind contract contains only three roots:
 
-```bash
-export PGTK_PYSAM_IMAGE="$DATA_ROOT/singularity_cache/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img"
-export PGTK_IGV_REPORTS_IMAGE="$DATA_ROOT/singularity_cache/quay.io-biocontainers-igv-reports-1.16.0--pyh7e72e81_0.img"
-bash serve_finding_explorer.sh "$DATA_ROOT/results/igv/findings/finding_explorer" 8765
+```text
+Project root: source, results, references, container cache, SRA cache, samplesheet and NXF_HOME
+Work root: Nextflow task work directories
+Temporary root: task temporary files
 ```
 
-The server extracts event-specific BAMs from exact identities in `display_alignment_manifest.tsv.gz`. Sample-wide display BAMs are storage pools only.
+Nested project directories are not rebound individually. The wrapper creates output directories, including `results/`, before use, so a clean first run does not depend on outputs from an earlier run. Optional external VCF and MaxQuant roots are added only when those inputs are outside the three existing roots.
+
+## Finding Explorer
+
+The database-free explorer is published under the configured results directory.
+
+Generic launch:
+
+```bash
+cd "$PROJECT_ROOT"
+
+EXPLORER_PORT=${PGTK_EXPLORER_PORT:-8765}
+export PGTK_PYSAM_IMAGE="$PROJECT_ROOT/singularity_cache/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img"
+export PGTK_IGV_REPORTS_IMAGE="$PROJECT_ROOT/singularity_cache/quay.io-biocontainers-igv-reports-1.16.0--pyh7e72e81_0.img"
+
+bash "$PROJECT_ROOT/serve_finding_explorer.sh" \
+  "$RESULTS_DIR/igv/findings/finding_explorer" \
+  "$EXPLORER_PORT"
+```
+
+Saga tested example for the validated results tree:
+
+```bash
+cd /cluster/projects/nn9036k/scrbkup/PGTK
+
+export PGTK_PYSAM_IMAGE="$PWD/singularity_cache/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img"
+export PGTK_IGV_REPORTS_IMAGE="$PWD/singularity_cache/quay.io-biocontainers-igv-reports-1.16.0--pyh7e72e81_0.img"
+
+bash serve_finding_explorer.sh \
+  "$PWD/results-validation-20260904/igv/findings/finding_explorer" \
+  8765
+```
+
+Open `http://127.0.0.1:8765/` through the required SSH tunnel. Search and filters cover genes, EventIDs, consequences, samples, evidence classes, impacts, chromosomes, event types, and visual-evidence statuses.
+
+### Visual evidence contract
+
+Every generated report begins with a prominent selected-event summary. It states the event type, sample, gene, complete classified counts, status, reference representation, alternate representation, and a human-readable action. The same action appears in the red `PGTK_TARGET` label and report title.
+
+For insertions, the inserted sequence has no independent reference coordinate. The summary displays it explicitly, for example `REFERENCE: C`, `ALTERNATE: C[A]`, while exact-alt reads retain IGV's insertion symbol at the anchor. Complete classified counts may exceed the capped number of displayed reads.
+
+Every generated report contains a red `PGTK_TARGET` track. This track is the authoritative geometry for the selected event:
+
+```text
+SNV or MNV: normalized REF span [POS - 1, POS - 1 + len(REF))
+Insertion: retained one-base or multi-base REF anchor
+Deletion: full normalized REF span, including retained anchor
+Complex allele: full normalized REF span
+Splice junction: exact donor-to-acceptor source interval
+Fusion: separate BREAKPOINT_1 and BREAKPOINT_2 markers, including interchromosomal events
+```
+
+Colored bases or indel marks elsewhere in a read are additional alignment differences and are not automatically the classified event. This distinction is important when a read contains multiple mismatches.
+
+For allele events, the report tracks mean:
+
+```text
+event_display: union of displayed exact-ALT and clean-reference identities
+exact_alt_display: only alignments classified against the exact normalized REF/ALT event
+reference_display: only clean-reference alignments, capped for display
+```
+
+For splice junctions and fusions, `event_display` contains contextual overlapping alignments. Context alignments are not allele-classified support. Structural events therefore use `CONTEXT_ALIGNMENTS_AVAILABLE` or `NO_CONTEXT_ALIGNMENTS` as the visual-evidence status, while preserving the upstream validation class separately. `NO_CALLABLE_READS` remains an allele-classification result and must not be used to imply that a splice or fusion lacks contextual RNA evidence.
+
+The explorer writes `event_geometry.json` from `pgtk_igv.events.tsv`; this preserves exact splice boundaries and both fusion breakpoints. Report cache keys include event content, geometry, input BAM sizes and modification times, display manifest, genome path, and cache version. Event cache directories include a hash of the full EventID, preventing sanitized-name collisions.
+
+`BUILD_FINDING_EXPLORER` compiles generated `server.py`, parses `explorer_config.json` and `event_geometry.json`, validates the launcher shell syntax, and compiles copied helper scripts before publication. Post-run validation checks geometry count, region validity, structural-event roles, generated-server compilation, evidence-status semantics, and finding arithmetic.
+
+### Interpretation limits
+
+`ALT_SUPPORTED` means exact ALT alignments were found and no clean-reference alignment was classified. `MIXED_ALT_AND_REFERENCE` means both exact ALT and clean-reference alignments were found. Neither label by itself means configured minimum ALT-read or ALT-fraction thresholds passed. Counts are primary alignments, not unique molecules, unless explicitly stated otherwise.
+
 
 ## Core defaults
 
@@ -522,7 +935,7 @@ The following files are expected in the flat repository root. `pipeline_required
 - `validate_variant_codons.py`: Validates VEP codon/protein consequences against exact RNA read evidence.
 - `validate_variant_read_provenance.py`: Reports exact ALT-supporting RNA reads with SRA, FASTQ mate, alignment, CIGAR, and quality provenance.
 - `variant_read_evidence.py`: Shared exact-allele read classifier used by codon, provenance, IGV, and final validation code.
-- `pipeline_required_files.txt`: Authoritative source-file manifest used by preflight validation. This file must remain in the repository even though it was not included in this review archive.
+- `pipeline_required_files.txt`: Authoritative source-file manifest used by preflight validation. Keep it synchronized with every required root-level source, test, configuration, and documentation file.
 
 
 ## Common failures
@@ -535,6 +948,8 @@ The following files are expected in the flat repository root. `pipeline_required
 - Final validation failure: inspect `results/validation/PGTK-complete-validation-<job-id>/checks.tsv` and deep-audit `issues.tsv`.
 - A biological `failed.tsv` is not a process failure. Use the trace, wrapper exit code, failure ledger, and final validation report.
 - Independent audit warns that samtools is unavailable: rerun with the Pysam wrapper shown above.
+- Explorer `server.py` syntax or stale-report problem: regenerate `BUILD_FINDING_EXPLORER`; generated server compilation and cache invalidation are part of the current source contract.
+- Ambiguous IGV visual marker: use the red TARGET coordinate track as the classified locus; other colored bases or insertion markers are incidental read differences.
 
 ## Acceptance checklist
 
@@ -550,6 +965,10 @@ Independent audit: FAIL 0
 Pysam BAM quickcheck: all BAMs PASS
 Archive checksums: PASS
 ```
+
+## Audit exceptions and index reporting
+
+The independent audit allows only the known empty MultiQC Picard histogram exports under `qc/multiqc_report_data/`; other unexpected empty files remain warnings. BAM/CRAM indexes must exist and alignment readability is tested independently. An index timestamp older than its alignment is a WARN and requires index regeneration after rewriting the alignment; exact-runtime quickcheck remains a separate integrity check.
 
 ## License
 
