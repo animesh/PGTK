@@ -295,3 +295,21 @@ work/
 
 # Required production source manifest
 !pipeline_required_files.txt
+
+# Ignore all root-level directories because PGTK source is intentionally flat.
+/*/
+
+# Keep the tracked GitHub configuration.
+!/.github/
+!/.github/workflows/
+!/.github/workflows/jekyll-gh-pages.yml
+
+# Generated root-level runtime and validation files
+/VALIDATION.json
+/pgtk-wrapper-*.log
+/pipeline_command_validation_*.txt
+/PGTK-independent-audit-*.tar.gz
+/PGTK-independent-audit-*.tar.gz.sha256
+/.pgtk_current_job_id
+/.pgtk_current_preflight_job_id
+/*.before-*
