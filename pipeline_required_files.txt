@@ -5,6 +5,8 @@ PIPELINE_VALIDATION_SEMANTICS.md
 README.md
 analyze_chimeric_splice_peptides.py
 analyze_codon_mismatches.py
+analyze_maxquant_hypotheses.py
+analyze_pgtk_biology.py
 analyze_pipeline_trace.py
 analyze_progression_biology.py
 analyze_variant_landscape.py

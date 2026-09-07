@@ -723,7 +723,61 @@ Run PGTK first with the branch disabled, search the published sample FASTAs exte
 --maxquant_contaminants /path/to/contaminants.fasta
 ```
 
-Required inputs are `peptides.txt`, `evidence.txt`, `msms.txt`, `proteinGroups.txt`, `mqpar.xml`, searched FASTAs, and the contaminants FASTA.
+Required inputs are `peptides.txt`, `evidence.txt`, `msms.txt`, `proteinGroups.txt`, `mqpar.xml`, searched FASTAs, and the contaminants FASTA e.g. a saga run:
+
+```bash
+# download MS data
+wget -r "ftp://ftp.pride.ebi.ac.uk/pride/data/archive/2024/11/PXD033510/"
+# download MaxQuant and install then adjust following parameters 
+wget https://raw.githubusercontent.com/animesh/scripts/2c501bf0439ed82a84c75c1a181fe754583c2876/mqpar.xml
+# finally search
+wget https://raw.githubusercontent.com/animesh/scripts/2c501bf0439ed82a84c75c1a181fe754583c2876/scratch.slurm
+sbatch scratch.slurm
+```
+
+generates the required input for:
+
+```bash
+JOB_ID=$(sbatch --parsable \
+  --account=nn9036k \
+  scratch.slurm \
+  --account nn9036k \
+  --normal-partition normal \
+  --bigmem-partition bigmem \
+  --project-dir "$PWD" \
+  --work-dir /cluster/work/users/ash022/PGTK-production/pgtk-work \
+  --results-dir "$PWD/results" \
+  --reference-downloads "$PWD/reference_downloads" \
+  --container-cache "$PWD/singularity_cache" \
+  --sra-dir "$PWD/sra_cache" \
+  --tmp-root /cluster/work/users/ash022/PGTK-production/pgtk-tmp \
+  --nxf-home "$PWD/.nextflow_home" \
+  --samplesheet "$PWD/samples.csv" \
+  --ensembl-pep "$PWD/reference_downloads/Homo_sapiens.GRCh38.pep.all.fa.gz" \
+  --pysam-image "$PWD/singularity_cache/quay.io-biocontainers-pysam-0.24.0--py312hf5ad864_1.img" \
+  --nextflow /cluster/home/ash022/bin/nextflow \
+  --python /cluster/software/Mamba/4.14.0-0/bin/python3 \
+  --apptainer /usr/bin/apptainer \
+  --java-module Java/21 \
+  --slurm-log-template "$PWD/pgtk-wrapper-{job_id}.log" \
+  -- \
+  --run_proteogenomic_validation true \
+  --maxquant_txt /cluster/home/ash022/scripts/ftp.pride.ebi.ac.uk/pride/data/archive/2024/11/PXD033510/combined/txt \
+  --maxquant_mqpar /cluster/home/ash022/scripts/mqpar.xml \
+  --maxquant_contaminants /cluster/home/ash022/scripts/MaxQuant_v2.8.1.0/bin/conf/contaminants.fasta
+)
+printf '%s\n' "$JOB_ID" | tee .pgtk_current_job_id
+tail -F "pgtk-wrapper-${JOB_ID}.log"
+```
+
+check for hypotheses:
+
+```bash
+#PGTK
+/cluster/software/Mamba/4.14.0-0/bin/python3   analyze_pgtk_biology.py   --project-dir "$PWD"   --results-dir "$PWD/results"   --output-dir "$PWD/results/biological_review_hypotheses"   --top-findings 0
+#+MaxQuant 
+python3 analyze_maxquant_hypotheses.py
+```
 
 ## Runtime bind and first-run contract
 
